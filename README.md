@@ -145,13 +145,17 @@ Endpoints used: `POST /v1/search`, `GET /v1/pages/{id}`,
 ### ACLs and ingest
 
 Connectors are read-only; nothing here maps source-side permissions (Jira
-issue security, Confluence restrictions, Notion sharing) into the kit.
-Instead every document from a connector is tagged with that connector's
-configured default `acl`, which is then enforced by the usual
+issue security, Confluence restrictions, Notion sharing) into the kit -
+that mapping is still absent, so the configured ACL is the only access
+control on external content. Every document from a connector is tagged
+with that connector's configured `acl`, enforced by the usual
 permissions-aware retrieval (`roleAcls` in `kit.config.yaml`). A
 connector with no `acl` configured defaults to a tag named after the
 connector type (`jira`, `confluence`, `notion`), which no role sees until
-you grant it.
+you grant it. An inline `acl:` line inside a document is honored only for
+local filesystem docs, never for external connector content - source text
+must not broaden its own access. Re-ingesting identical content under a
+tighter ACL re-tags the stored chunks, so revocations take effect.
 
 Search prefixes: `jira:`/`cql:` pass raw JQL/CQL, anything else is a
 text search. Ingest any connector doc through the gated command:

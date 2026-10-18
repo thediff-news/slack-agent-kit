@@ -45,9 +45,11 @@ export class KnowledgeSkill implements Skill {
       if (!connector) return { findings: "No `docs` connector configured - cannot ingest.", actions: [] };
       const doc = await connector.get(target);
       if (!doc) return { findings: `Cannot read \`${target}\` via the ${connector.name} connector.`, actions: [] };
-      // ACL precedence: explicit `acl: <tag>` first line in the body, then the
-      // connector's configured default, then public.
-      const acl = /^acl:\s*(\S+)/m.exec(doc.body)?.[1] ?? doc.acl ?? "public";
+      // ACL precedence: the connector's configured ACL always wins for
+      // external sources. An inline `acl: <tag>` line is honored ONLY for
+      // local docs (no connector-set ACL) - source text from Jira/Confluence/
+      // Notion must never broaden its own access.
+      const acl = doc.acl ?? /^acl:\s*(\S+)/m.exec(doc.body)?.[1] ?? "public";
       return {
         findings: `Ready to ingest \`${target}\` (${doc.body.length} chars, ACL \`${acl}\`) into the knowledge base. This changes what I will tell everyone - needs approval.`,
         actions: [{

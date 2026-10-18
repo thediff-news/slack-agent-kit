@@ -16,7 +16,8 @@ export interface Retrieved {
  * Ingest -> embed -> store -> retrieve, all local: documents are chunked,
  * embedded with the configured Embedder, and stored as blobs in SQLite.
  * Ingestion is idempotent per (source, content hash), so re-running it
- * never duplicates chunks.
+ * never duplicates chunks - and re-ingesting identical content under a
+ * different ACL updates the stored ACL, so tightening always takes effect.
  */
 export class Rag {
   private db: Database.Database;
@@ -38,8 +39,11 @@ export class Rag {
     for (const chunk of chunkDocument(source, text)) {
       const id = createHash("sha256").update(`${source}:${chunk.index}:${chunk.text}`).digest("hex").slice(0, 32);
       const vec = await this.embedder.embed(chunk.text);
+      // Upsert: identical content under a new ACL re-tags the existing
+      // chunk (the WHERE keeps no-op re-ingests at 0 changes).
       const res = this.db
-        .prepare("INSERT OR IGNORE INTO chunks (id, source, idx, text, embedding, acl) VALUES (?,?,?,?,?,?)")
+        .prepare(`INSERT INTO chunks (id, source, idx, text, embedding, acl) VALUES (?,?,?,?,?,?)
+                  ON CONFLICT(id) DO UPDATE SET acl=excluded.acl WHERE chunks.acl != excluded.acl`)
         .run(id, chunk.source, chunk.index, chunk.text, Buffer.from(vec.buffer), acl);
       n += res.changes;
     }
