@@ -55,6 +55,7 @@ test("RBAC: viewer cannot trigger mutating skill, operator can, channel allow-li
     users: { alice: "operator", bob: "viewer" },
     approvers: ["alice"],
     channels: { sec: { allow: ["credential-triage"] }, general: { allow: ["*"] } },
+    roleAcls: {},
   });
   assert.equal(perms.canTrigger("bob", "credential-triage", "mutating", "general").ok, false);
   assert.equal(perms.canTrigger("alice", "credential-triage", "mutating", "general").ok, true);

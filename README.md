@@ -53,10 +53,19 @@ Slack mention / watched channel / webhook / CLI
   durable and single-use. The agent never merges, deploys or revokes on its own.
 - **Audit log** (`src/core/audit.ts`) - append-only JSONL with a hash chain;
   tampering breaks verification.
-- **Example skill** (`src/skills/credential-triage.ts`) - leaked-credential
-  triage: locate the key, map usage, name the owner, compute blast radius,
-  cite the rotation policy from the RAG, propose a gated rotation.
-  (Verified standalone version: [leaked-credential-triage](https://github.com/thediff-news/leaked-credential-triage).)
+- **Five reference skills** (`src/skills/`), each a template for a common
+  agent shape - see [docs/SKILLS.md](docs/SKILLS.md):
+  - `credential-triage` - leaked key -> usage map, owner, blast radius, gated
+    rotation. (Verified standalone version: [leaked-credential-triage](https://github.com/thediff-news/leaked-credential-triage).)
+  - `company-brain` - ask anything from the ingested docs: answers with
+    citations and source freshness, permissions-aware retrieval (ACLs per
+    role), gated `ingest <path>` command, honest "I don't know" on a miss.
+  - `incident-triage` - traceback -> implicated frames -> suspect commit from
+    git history -> runbook enrichment -> gated draft fix.
+  - `support-triage` - ticket -> classification -> reply drafted from
+    public-only knowledge -> gated send.
+  - `alert-router` - repeated alerts deduped by durable fingerprint, routed
+    to owners from config, gated escalation on refiring.
 
 ## Run the demo (no Slack, no keys)
 
@@ -67,10 +76,11 @@ npm run demo -- --approve
 npm test
 ```
 
-The demo fires a fake secret-scanning alert at a fixture repo with a planted
-fake key, then shows: the report, the approval gate, duplicate-delivery
-drop, the audit trail (hash chain verified), and a restart resuming without
-re-executing.
+The demo runs all five skills end to end: a knowledge question (admin vs
+viewer ACLs), a gated ingest, a leaked-key alert, a production traceback, a
+refund ticket, and the same alert three times (dedup -> escalation). It
+finishes with the audit trail (hash chain verified) and a restart resuming
+without re-executing.
 
 ## Run against real Slack
 

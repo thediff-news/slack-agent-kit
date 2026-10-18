@@ -12,6 +12,9 @@ connectors:
   triage-target:
     type: filesystem
     root: examples/fixtures/target-repo
+  incident-target:
+    type: filesystem
+    root: examples/fixtures/incident-repo
 permissions:
   roles:
     admin: [read, propose, execute, approve]
@@ -19,9 +22,21 @@ permissions:
     viewer: [read]
   users:
     cli-operator: admin
+    cli-viewer: viewer
   approvers: [cli-operator]
   channels:
     cli:
       allow: ["*"]
+  roleAcls:
+    admin: [finance, engineering]
+    operator: [engineering]
+    viewer: []
 approval:
   timeoutMinutes: 60
+skills:
+  alert-router:
+    escalateThreshold: 3
+    routing:
+      checkout: "@payments-oncall"
+      payments: "@payments-oncall"
+      auth: "@identity-oncall"

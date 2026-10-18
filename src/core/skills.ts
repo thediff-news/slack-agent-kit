@@ -31,6 +31,8 @@ export interface SkillContext {
   reply(text: string): Promise<void>;
   /** Ask the RAG for context and append source links. */
   enrich(query: string, k?: number): Promise<string>;
+  /** Knowledge-base ACL tags this user may see ("public" always included). */
+  aclsFor(userId: string): string[];
 }
 
 export interface Skill {

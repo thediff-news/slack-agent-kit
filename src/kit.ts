@@ -3,7 +3,6 @@
  * with their own hooks. */
 import { loadConfig, type KitConfig } from "./core/config.js";
 import { SqliteStore } from "./core/store-sqlite.js";
-import { PiDurableStore } from "./core/store-pi.js";
 import type { DurableStore } from "./core/store.js";
 import { AuditLog } from "./core/audit.js";
 import { Permissions } from "./core/permissions.js";
@@ -16,6 +15,10 @@ import { FilesystemConnector } from "./connectors/fs.js";
 import { GitHubConnector } from "./connectors/github.js";
 import type { Connector } from "./connectors/types.js";
 import { CredentialTriageSkill } from "./skills/credential-triage.js";
+import { KnowledgeSkill } from "./skills/knowledge.js";
+import { IncidentTriageSkill } from "./skills/incident-triage.js";
+import { SupportTriageSkill } from "./skills/support-triage.js";
+import { AlertRouterSkill } from "./skills/alert-router.js";
 
 export interface Kit {
   config: KitConfig;
@@ -33,10 +36,13 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
 
   // The pi-durable adapter is the foundation store; SQLite remains the
   // zero-friction default while pi-durable's API is experimental.
-  const store: DurableStore =
-    config.store.driver === "pi-durable"
-      ? await PiDurableStore.open(config.store.path)
-      : new SqliteStore(config.store.path);
+  let store: DurableStore;
+  if (config.store.driver === "pi-durable") {
+    const { PiDurableStore } = await import("./core/store-pi.js"); // lazy: keeps node:sqlite warning off the default path
+    store = await PiDurableStore.open(config.store.path);
+  } else {
+    store = new SqliteStore(config.store.path);
+  }
   const audit = new AuditLog(config.auditLogPath);
   const permissions = new Permissions(config.permissions);
   const rag = new Rag(config.rag.dbPath, new HashingEmbedder(config.rag.dimensions));
@@ -50,14 +56,21 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   const registry = new SkillRegistry();
   const triageRepo = config.connectors["triage-target"]?.root ?? ".";
   registry.register(new CredentialTriageSkill(triageRepo));
+  registry.register(new KnowledgeSkill());
+  const incidentRepo = config.connectors["incident-target"]?.root ?? triageRepo;
+  registry.register(new IncidentTriageSkill(incidentRepo));
+  registry.register(new SupportTriageSkill());
+  const routerCfg = (config.skills?.["alert-router"] ?? {}) as { routing?: Record<string, string>; escalateThreshold?: number };
+  registry.register(new AlertRouterSkill(routerCfg.routing ?? {}, routerCfg.escalateThreshold ?? 3));
 
   const makeSkillContext = (event: AgentEvent): SkillContext => ({
     store, audit, rag, connectors, config,
     reply: (text) => hooks.notify(event, text),
     enrich: async (query, k = 3) => {
-      const hits = rag.retrieve(query, k);
-      return hits.map((h) => `- (${h.source}) ${h.text.slice(0, 300)}`).join("\n");
+      const hits = rag.retrieve(query, k, permissions.aclsFor(event.actorId));
+      return hits.map((h) => `- (${h.source}, ingested ${h.ingestedAt}) ${h.text.slice(0, 300)}`).join("\n");
     },
+    aclsFor: (userId) => permissions.aclsFor(userId),
   });
 
   const runtime = new Runtime(store, audit, permissions, registry, config, hooks, makeSkillContext);

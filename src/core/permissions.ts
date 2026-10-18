@@ -6,6 +6,8 @@ export interface PermissionsConfig {
   users: Record<string, string>;
   approvers: string[];
   channels: Record<string, { allow: string[] }>;
+  /** Knowledge-base ACL tags each role may retrieve. "public" is always included. */
+  roleAcls: Record<string, string[]>;
 }
 
 /**
@@ -34,6 +36,11 @@ export class Permissions {
       return { ok: false, reason: `user ${userId} lacks '${needed}' (role ${this.cfg.users[userId] ?? "viewer"})` };
     }
     return { ok: true };
+  }
+
+  aclsFor(userId: string): string[] {
+    const role = this.cfg.users[userId] ?? "viewer";
+    return ["public", ...(this.cfg.roleAcls[role] ?? [])];
   }
 
   canApprove(userId: string): boolean {

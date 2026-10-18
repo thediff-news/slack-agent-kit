@@ -1,5 +1,20 @@
 import { createHash } from "node:crypto";
 
+const STOPWORDS = new Set(["what", "are", "the", "do", "does", "we", "when", "a", "an", "is", "of", "to", "in", "on", "for", "and", "or", "it", "i", "my", "me", "can", "how", "where", "was", "were", "this", "that", "with", "about", "know"]);
+
+/** Lowercase, drop stopwords, naive stem (plurals/-ed/-ing). Shared by the
+ * embedder and the retrieval overlap filter, so both see the same tokens. */
+export function tokenize(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9_]{2,}/g) ?? [])
+    .filter((t) => !STOPWORDS.has(t))
+    .map((t) => {
+      if (t.length > 5 && t.endsWith("ing")) return t.slice(0, -3);
+      if (t.length > 4 && t.endsWith("ed")) return t.slice(0, -2);
+      if (t.length > 3 && t.endsWith("s") && !t.endsWith("ss")) return t.slice(0, -1);
+      return t;
+    });
+}
+
 export interface Embedder {
   dimensions: number;
   embed(text: string): Float32Array;
@@ -17,7 +32,7 @@ export class HashingEmbedder implements Embedder {
 
   embed(text: string): Float32Array {
     const vec = new Float32Array(this.dimensions);
-    for (const token of text.toLowerCase().match(/[a-z0-9_]{2,}/g) ?? []) {
+    for (const token of tokenize(text)) {
       const h = createHash("sha256").update(token).digest();
       const idx = h.readUInt32BE(0) % this.dimensions;
       const sign = h[4] % 2 === 0 ? 1 : -1;

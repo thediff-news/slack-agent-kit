@@ -9,6 +9,8 @@ export interface KitConfig {
   connectors: Record<string, Record<string, string>>;
   permissions: PermissionsConfig;
   approval: { timeoutMinutes: number };
+  /** Free-form per-skill config, keyed by skill name. */
+  skills: Record<string, Record<string, unknown>>;
 }
 
 export function loadConfig(path: string): KitConfig {
