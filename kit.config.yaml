@@ -1,0 +1,27 @@
+store:
+  driver: sqlite          # "pi-durable" to run state on @earendil-works/pi-durable instead
+  path: data/kit.sqlite
+auditLogPath: data/audit.jsonl
+rag:
+  dbPath: data/rag.sqlite
+  dimensions: 512
+connectors:
+  docs:
+    type: filesystem
+    root: examples/fixtures/demo-docs
+  triage-target:
+    type: filesystem
+    root: examples/fixtures/target-repo
+permissions:
+  roles:
+    admin: [read, propose, execute, approve]
+    operator: [read, propose, approve]
+    viewer: [read]
+  users:
+    cli-operator: admin
+  approvers: [cli-operator]
+  channels:
+    cli:
+      allow: ["*"]
+approval:
+  timeoutMinutes: 60

@@ -1,0 +1,5 @@
+service: payments
+environment: staging
+paydemo:
+  base_url: https://api.staging.paydemo.example.com
+  api_key: ${PAYDEMO_API_KEY}

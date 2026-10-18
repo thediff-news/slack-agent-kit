@@ -1,0 +1,29 @@
+{
+  "name": "slack-agent-kit",
+  "version": "0.1.0",
+  "description": "Generic infrastructure for approval-gated chat agents: Slack listener, pluggable connectors, local RAG, durable dedup, RBAC, approval gates, audit log.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "demo": "tsx examples/demo-run.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "slack": "tsx src/adapters/slack.ts"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "^1.0.0",
+    "@earendil-works/pi-ai": "^1.0.0",
+    "@earendil-works/pi-durable": "^1.3.0",
+    "@slack/bolt": "^4.2.0",
+    "better-sqlite3": "^11.10.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
