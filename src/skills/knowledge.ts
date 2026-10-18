@@ -32,23 +32,32 @@ export class KnowledgeSkill implements Skill {
 
     const ingestMatch = /^ingest\s+(\S+)/i.exec(text);
     if (ingestMatch) {
-      const docPath = ingestMatch[1];
-      const connector = ctx.connectors["docs"];
+      // `ingest <path>` reads via the docs connector; `ingest <connector>:<id>`
+      // (e.g. `ingest jira:PROJ-123`, `ingest notion:<page-id>`) reads any
+      // configured connector by name.
+      let target = ingestMatch[1];
+      let connector = ctx.connectors["docs"];
+      const prefixed = /^([a-z0-9_-]+):(.+)$/i.exec(target);
+      if (prefixed && ctx.connectors[prefixed[1]]) {
+        connector = ctx.connectors[prefixed[1]];
+        target = prefixed[2];
+      }
       if (!connector) return { findings: "No `docs` connector configured - cannot ingest.", actions: [] };
-      const doc = await connector.get(docPath);
-      if (!doc) return { findings: `Cannot read \`${docPath}\` via the docs connector.`, actions: [] };
-      // ACL convention: a first line of the form `acl: <tag>` tags the document.
-      const acl = /^acl:\s*(\S+)/m.exec(doc.body)?.[1] ?? "public";
+      const doc = await connector.get(target);
+      if (!doc) return { findings: `Cannot read \`${target}\` via the ${connector.name} connector.`, actions: [] };
+      // ACL precedence: explicit `acl: <tag>` first line in the body, then the
+      // connector's configured default, then public.
+      const acl = /^acl:\s*(\S+)/m.exec(doc.body)?.[1] ?? doc.acl ?? "public";
       return {
-        findings: `Ready to ingest \`${docPath}\` (${doc.body.length} chars, ACL \`${acl}\`) into the knowledge base. This changes what I will tell everyone - needs approval.`,
+        findings: `Ready to ingest \`${target}\` (${doc.body.length} chars, ACL \`${acl}\`) into the knowledge base. This changes what I will tell everyone - needs approval.`,
         actions: [{
-          key: actionKey("ingest", docPath, String(doc.body.length)),
+          key: actionKey("ingest", `${connector.name}:${target}`, String(doc.body.length)),
           tier: "mutating",
-          summary: `Ingest ${docPath} into the knowledge base (ACL: ${acl})`,
+          summary: `Ingest ${target} (via ${connector.name}) into the knowledge base (ACL: ${acl})`,
           run: async () => {
-            const n = await ctx.rag.ingest(docPath, doc.body, acl);
-            await ctx.store.set("kb", `ingested:${docPath}`, new Date().toISOString());
-            return `ingested ${n} new chunk(s) from ${docPath} (ACL: ${acl})`;
+            const n = await ctx.rag.ingest(doc.id, doc.body, acl);
+            await ctx.store.set("kb", `ingested:${connector.name}:${doc.id}`, new Date().toISOString());
+            return `ingested ${n} new chunk(s) from ${doc.id} via ${connector.name} (ACL: ${acl})`;
           },
         }],
       };

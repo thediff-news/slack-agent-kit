@@ -14,6 +14,9 @@ import { HashingEmbedder } from "./rag/embed.js";
 import { openAiFromEnv } from "./llm/openai.js";
 import { FilesystemConnector } from "./connectors/fs.js";
 import { GitHubConnector } from "./connectors/github.js";
+import { JiraConnector } from "./connectors/jira.js";
+import { ConfluenceConnector } from "./connectors/confluence.js";
+import { NotionConnector } from "./connectors/notion.js";
 import type { Connector } from "./connectors/types.js";
 import { CredentialTriageSkill } from "./skills/credential-triage.js";
 import { KnowledgeSkill } from "./skills/knowledge.js";
@@ -55,6 +58,25 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   for (const [name, cfg] of Object.entries(config.connectors)) {
     if (cfg.type === "filesystem") connectors[name] = new FilesystemConnector(cfg.root);
     if (cfg.type === "github") connectors[name] = new GitHubConnector(cfg.repos.split(",").map((s) => s.trim()));
+    // SaaS connectors are env-gated: missing credentials disable the
+    // connector with a warning, never a failure (keyless kit unaffected).
+    if (cfg.type === "jira" || cfg.type === "confluence") {
+      const site = cfg.site ?? process.env.ATLASSIAN_SITE ?? "";
+      const email = process.env.ATLASSIAN_EMAIL ?? "";
+      const token = process.env.ATLASSIAN_API_TOKEN ?? "";
+      if (site && email && token) {
+        connectors[name] = cfg.type === "jira"
+          ? new JiraConnector(site, email, token, cfg.acl)
+          : new ConfluenceConnector(site, email, token, cfg.acl);
+      } else {
+        console.warn(`[connectors] ${name}: ATLASSIAN_SITE/ATLASSIAN_EMAIL/ATLASSIAN_API_TOKEN missing - disabled`);
+      }
+    }
+    if (cfg.type === "notion") {
+      const key = process.env.NOTION_API_KEY ?? "";
+      if (key) connectors[name] = new NotionConnector(key, cfg.acl);
+      else console.warn(`[connectors] ${name}: NOTION_API_KEY missing - disabled`);
+    }
   }
 
   const registry = new SkillRegistry();

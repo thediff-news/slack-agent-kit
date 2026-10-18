@@ -14,4 +14,7 @@ export interface ConnectorDoc {
   title: string;
   body: string;
   url?: string;
+  /** Default RAG ACL tag for this doc, from the connector's config. An
+   * explicit `acl:` first line in the body still wins on ingest. */
+  acl?: string;
 }
