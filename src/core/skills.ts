@@ -5,6 +5,7 @@ import type { Rag } from "../rag/rag.js";
 import type { Connector } from "../connectors/types.js";
 import type { Tier } from "./permissions.js";
 import type { KitConfig } from "./config.js";
+import type { Llm } from "../llm/openai.js";
 
 /** A unit of work the agent wants to do. Mutating actions only run after approval. */
 export interface ProposedAction {
@@ -33,6 +34,8 @@ export interface SkillContext {
   enrich(query: string, k?: number): Promise<string>;
   /** Knowledge-base ACL tags this user may see ("public" always included). */
   aclsFor(userId: string): string[];
+  /** Optional hosted LLM (e.g. OpenAI, enabled via env). Undefined in the keyless kit. */
+  llm?: Llm;
 }
 
 export interface Skill {

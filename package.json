@@ -4,7 +4,9 @@
   "description": "Generic infrastructure for approval-gated chat agents: Slack listener, pluggable connectors, local RAG, durable dedup, RBAC, approval gates, audit log.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "demo": "tsx examples/demo-run.ts",
     "test": "tsx --test tests/*.test.ts",
@@ -17,7 +19,8 @@
     "@earendil-works/pi-durable": "^1.3.0",
     "@slack/bolt": "^4.2.0",
     "better-sqlite3": "^11.10.0",
-    "js-yaml": "^4.1.0"
+    "js-yaml": "^4.1.0",
+    "openai": "^7.38.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

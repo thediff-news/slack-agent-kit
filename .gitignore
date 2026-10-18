@@ -1,3 +1,6 @@
 node_modules/
 data/
 *.log
+.env
+examples/fixtures/incident-repo/
+examples/fixtures/target-repo/.git/

@@ -31,7 +31,7 @@ export class SupportTriageSkill implements Skill {
     // Customer-facing drafts use PUBLIC knowledge only. Retrieving with the
     // operator's ACLs could leak restricted docs (finance, internal) into a
     // reply that leaves the company.
-    const kb = ctx.rag.retrieve(body, 3, ["public"]);
+    const kb = await ctx.rag.retrieve(body, 3, ["public"]);
     const grounded = kb.length > 0;
 
     const draft = [

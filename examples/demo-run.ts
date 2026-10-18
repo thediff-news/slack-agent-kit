@@ -40,7 +40,7 @@ console.log("== 1. Ingest demo docs (public + ACL-tagged) ==");
 for (const f of readdirSync("examples/fixtures/demo-docs")) {
   const body = readFileSync(join("examples/fixtures/demo-docs", f), "utf8");
   const acl = /^acl:\s*(\S+)/m.exec(body)?.[1] ?? "public";
-  console.log(`   ${f}: ${kit.rag.ingest(`docs/${f}`, body, acl)} chunk(s), acl=${acl}`);
+  console.log(`   ${f}: ${await kit.rag.ingest(`docs/${f}`, body, acl)} chunk(s), acl=${acl}`);
 }
 console.log(`   total chunks: ${kit.rag.count()}`);
 

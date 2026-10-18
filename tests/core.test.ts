@@ -65,15 +65,15 @@ test("RBAC: viewer cannot trigger mutating skill, operator can, channel allow-li
   assert.equal(perms.canApprove("bob"), false);
 });
 
-test("hashing embedder is deterministic and retrieves the right doc", () => {
+test("hashing embedder is deterministic and retrieves the right doc", async () => {
   const dir = tmp();
   const rag = new Rag(join(dir, "r.db"), new HashingEmbedder(256));
-  rag.ingest("policy.md", "Credential rotation policy: revoke the leaked key at the provider first, then remove it from source.");
-  rag.ingest("lunch.md", "The cafeteria serves pizza on Fridays and salad every other day.");
-  const hits = rag.retrieve("what do we do when a key leaks?", 1);
+  await rag.ingest("policy.md", "Credential rotation policy: revoke the leaked key at the provider first, then remove it from source.");
+  await rag.ingest("lunch.md", "The cafeteria serves pizza on Fridays and salad every other day.");
+  const hits = await rag.retrieve("what do we do when a key leaks?", 1);
   assert.equal(hits.length, 1);
   assert.equal(hits[0].source, "policy.md");
   // idempotent ingest
-  assert.equal(rag.ingest("policy.md", "Credential rotation policy: revoke the leaked key at the provider first, then remove it from source."), 0);
+  assert.equal(await rag.ingest("policy.md", "Credential rotation policy: revoke the leaked key at the provider first, then remove it from source."), 0);
   rag.close();
 });

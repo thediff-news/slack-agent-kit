@@ -33,11 +33,11 @@ export class Rag {
     `);
   }
 
-  ingest(source: string, text: string, acl = "public"): number {
+  async ingest(source: string, text: string, acl = "public"): Promise<number> {
     let n = 0;
     for (const chunk of chunkDocument(source, text)) {
       const id = createHash("sha256").update(`${source}:${chunk.index}:${chunk.text}`).digest("hex").slice(0, 32);
-      const vec = this.embedder.embed(chunk.text);
+      const vec = await this.embedder.embed(chunk.text);
       const res = this.db
         .prepare("INSERT OR IGNORE INTO chunks (id, source, idx, text, embedding, acl) VALUES (?,?,?,?,?,?)")
         .run(id, chunk.source, chunk.index, chunk.text, Buffer.from(vec.buffer), acl);
@@ -48,8 +48,8 @@ export class Rag {
 
   /** Permissions-aware retrieval: when `acls` is given, only chunks tagged
    * with one of those ACLs are visible. */
-  retrieve(query: string, k = 4, acls?: string[]): Retrieved[] {
-    const q = this.embedder.embed(query);
+  async retrieve(query: string, k = 4, acls?: string[]): Promise<Retrieved[]> {
+    const q = await this.embedder.embed(query);
     const qTokens = new Set(tokenize(query));
     const rows = this.db.prepare("SELECT source, text, embedding, acl, ingested_at FROM chunks").all() as any[];
     return rows

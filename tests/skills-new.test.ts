@@ -24,7 +24,7 @@ function makeCtx(dir: string, acls: string[] = ["public", "finance", "engineerin
     config: {},
     reply: async () => {},
     enrich: async (q: string, k = 3) =>
-      ctx.rag.retrieve(q, k, acls).map((h: any) => `- (${h.source}, ingested ${h.ingestedAt}) ${h.text.slice(0, 200)}`).join("\n"),
+      (await ctx.rag.retrieve(q, k, acls)).map((h: any) => `- (${h.source}, ingested ${h.ingestedAt}) ${h.text.slice(0, 200)}`).join("\n"),
     aclsFor: () => acls,
   };
   mkdirSync(join(dir, "docs"), { recursive: true });
@@ -34,8 +34,8 @@ function makeCtx(dir: string, acls: string[] = ["public", "finance", "engineerin
 test("company-brain: answers with citations, viewer ACL hides restricted docs, honesty on miss", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kit-kb-"));
   const ctx = makeCtx(dir);
-  ctx.rag.ingest("docs/public.md", "Incident runbook: revert first when customers are impacted, then fix in a draft PR.", "public");
-  ctx.rag.ingest("docs/finance.md", "Q4 wholesale discounts: 18% annual, pre-decisional, finance only.", "finance");
+  await ctx.rag.ingest("docs/public.md", "Incident runbook: revert first when customers are impacted, then fix in a draft PR.", "public");
+  await ctx.rag.ingest("docs/finance.md", "Q4 wholesale discounts: 18% annual, pre-decisional, finance only.", "finance");
 
   const skill = new KnowledgeSkill();
   const admin = await skill.handle(cliEvent("what are the Q4 discounts?"), ctx);
@@ -64,7 +64,7 @@ test("company-brain: ingest command proposes a gated action that ingests", async
   assert.equal(result.actions[0].tier, "mutating");
   assert.match(result.actions[0].summary, /ACL: engineering/);
   await result.actions[0].run();
-  const hits = ctx.rag.retrieve("deploy freeze", 2, ["public", "engineering"]);
+  const hits = await ctx.rag.retrieve("deploy freeze", 2, ["public", "engineering"]);
   assert.match(hits[0]?.text ?? "", /Fridays/);
   ctx.store.close();
 });
@@ -95,7 +95,7 @@ test("incident-triage: parses trace, names suspect commit, proposes gated fix", 
 test("support-triage: classifies billing, drafts grounded reply, gates the send", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kit-sup-"));
   const ctx = makeCtx(dir);
-  ctx.rag.ingest("docs/refunds.md", "Refund policy: duplicate charges are refunded in full within 5 business days.");
+  await ctx.rag.ingest("docs/refunds.md", "Refund policy: duplicate charges are refunded in full within 5 business days.");
   const skill = new SupportTriageSkill();
   const result = await skill.handle(cliEvent("ticket: I was billed twice, please refund the duplicate charge"), ctx);
   assert.match(result.findings, /billing/);

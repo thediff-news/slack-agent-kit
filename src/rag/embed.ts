@@ -17,7 +17,7 @@ export function tokenize(text: string): string[] {
 
 export interface Embedder {
   dimensions: number;
-  embed(text: string): Float32Array;
+  embed(text: string): Promise<Float32Array>;
 }
 
 /**
@@ -30,7 +30,7 @@ export interface Embedder {
 export class HashingEmbedder implements Embedder {
   constructor(public dimensions = 512) {}
 
-  embed(text: string): Float32Array {
+  async embed(text: string): Promise<Float32Array> {
     const vec = new Float32Array(this.dimensions);
     for (const token of tokenize(text)) {
       const h = createHash("sha256").update(token).digest();

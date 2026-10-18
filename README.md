@@ -91,11 +91,29 @@ and `npm run slack`.
 
 ## Where the LLM plugs in
 
-The kit runs keyless and deterministic by default. Two insertion points:
-- `Embedder` (`src/rag/embed.ts`) for hosted embeddings,
-- skill `handle()` for generative investigation/summarization; pi-durable's
-  own conversation/agent machinery (model providers via `@earendil-works/pi-ai`)
-  is already a dependency and ready to host that loop.
+The kit runs keyless and deterministic by default. An optional OpenAI
+provider (`src/llm/openai.ts`) is wired in and enabled purely by environment
+- no key, no change in behavior, and keys never live in the repo
+(`.env` is gitignored; see `.env.example`):
+
+```bash
+export OPENAI_API_KEY=sk-...        # enables hosted chat for skills
+export OPENAI_CHAT_MODEL=gpt-4o-mini          # optional override
+export OPENAI_EMBEDDINGS=1          # replace the local hashing embedder
+export OPENAI_EMBEDDING_MODEL=text-embedding-3-small  # optional
+# OPENAI_BASE_URL=...               # optional API-compatible endpoint
+```
+
+With a key set, `SkillContext.llm` is available to every skill; the
+company-brain skill uses it to compose prose answers from the retrieved
+chunks (ACL scoping and the honest "I don't know" are unchanged). With
+`OPENAI_EMBEDDINGS=1`, retrieval uses hosted embeddings - point
+`rag.dbPath` at a fresh database when switching embedders, since vectors
+from different providers are not comparable.
+
+The same insertion points remain open for other providers: `Embedder`
+(`src/rag/embed.ts`) for embeddings and the `Llm` interface
+(`src/llm/openai.ts`) for chat.
 
 ## Not included (deliberately)
 

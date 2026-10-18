@@ -46,7 +46,7 @@ export class KnowledgeSkill implements Skill {
           tier: "mutating",
           summary: `Ingest ${docPath} into the knowledge base (ACL: ${acl})`,
           run: async () => {
-            const n = ctx.rag.ingest(docPath, doc.body, acl);
+            const n = await ctx.rag.ingest(docPath, doc.body, acl);
             await ctx.store.set("kb", `ingested:${docPath}`, new Date().toISOString());
             return `ingested ${n} new chunk(s) from ${docPath} (ACL: ${acl})`;
           },
@@ -56,7 +56,7 @@ export class KnowledgeSkill implements Skill {
 
     const question = text.replace(/^(what do we know( about)?|kb:)\s*/i, "").replace(/\?+$/, "");
     const acls = ctx.aclsFor(event.actorId);
-    const hits = ctx.rag.retrieve(question, 4, acls);
+    const hits = await ctx.rag.retrieve(question, 4, acls);
     if (hits.length === 0) {
       return {
         findings: `I don't have anything on that in my knowledge base (searched ${acls.map((a) => `\`${a}\``).join(", ")} documents). Teach me with \`ingest <path>\`.`,
@@ -64,6 +64,21 @@ export class KnowledgeSkill implements Skill {
       };
     }
     const oldest = hits.map((h) => h.ingestedAt).sort()[0];
+    // Hosted LLM configured? Compose a prose answer from the retrieved
+    // chunks instead of quoting them raw. Grounding rules stay identical:
+    // only the asker's ACL-scoped hits reach the model, and it must say
+    // "I don't know" rather than invent. Keyless kit keeps the raw format.
+    if (ctx.llm) {
+      const sourced = hits.map((h) => `[${h.source}] ${h.text}`).join("\n\n");
+      const answer = await ctx.llm.chat([
+        { role: "system", content: "Answer only from the provided sources, tersely. Cite sources by name in [brackets]. If the sources do not answer the question, say you don't know." },
+        { role: "user", content: `Sources:\n${sourced}\n\nQuestion: ${question}` },
+      ]);
+      return {
+        findings: `${answer}\n\n*Sources:*\n` + hits.map((h) => `- \`${h.source}\` (acl: ${h.acl}, ingested ${h.ingestedAt})`).join("\n"),
+        actions: [],
+      };
+    }
     const findings = [
       `*What I know about "${question}":*`,
       "",

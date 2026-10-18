@@ -11,6 +11,7 @@ import { Runtime, type RuntimeHooks } from "./core/runtime.js";
 import type { AgentEvent } from "./core/events.js";
 import { Rag } from "./rag/rag.js";
 import { HashingEmbedder } from "./rag/embed.js";
+import { openAiFromEnv } from "./llm/openai.js";
 import { FilesystemConnector } from "./connectors/fs.js";
 import { GitHubConnector } from "./connectors/github.js";
 import type { Connector } from "./connectors/types.js";
@@ -45,7 +46,10 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   }
   const audit = new AuditLog(config.auditLogPath);
   const permissions = new Permissions(config.permissions);
-  const rag = new Rag(config.rag.dbPath, new HashingEmbedder(config.rag.dimensions));
+  // Optional OpenAI provider (OPENAI_API_KEY): hosted chat for skills, and
+  // hosted embeddings when OPENAI_EMBEDDINGS=1. Keyless default unchanged.
+  const openai = openAiFromEnv();
+  const rag = new Rag(config.rag.dbPath, openai?.embedder ?? new HashingEmbedder(config.rag.dimensions));
 
   const connectors: Record<string, Connector> = {};
   for (const [name, cfg] of Object.entries(config.connectors)) {
@@ -64,10 +68,10 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   registry.register(new AlertRouterSkill(routerCfg.routing ?? {}, routerCfg.escalateThreshold ?? 3));
 
   const makeSkillContext = (event: AgentEvent): SkillContext => ({
-    store, audit, rag, connectors, config,
+    store, audit, rag, connectors, config, llm: openai?.llm,
     reply: (text) => hooks.notify(event, text),
     enrich: async (query, k = 3) => {
-      const hits = rag.retrieve(query, k, permissions.aclsFor(event.actorId));
+      const hits = await rag.retrieve(query, k, permissions.aclsFor(event.actorId));
       return hits.map((h) => `- (${h.source}, ingested ${h.ingestedAt}) ${h.text.slice(0, 300)}`).join("\n");
     },
     aclsFor: (userId) => permissions.aclsFor(userId),
