@@ -306,3 +306,11 @@ test("loop: a vision planner receives a real base64 JPEG screenshot each step", 
   // JPEG magic bytes /9j/ in base64
   assert.ok(withShot[0].obs.screenshotBase64!.startsWith("/9j/"));
 });
+
+test("keyless heuristic planner: 'go to <url> and click <label>' queues the click (irreversible gate applies)", async () => {
+  const res = await runLoop(session, new HeuristicPlanner(), `go to ${base}/form and click Send`, {
+    allowlist: ["127.0.0.1"], gate: deny, // "Send" is irreversible-labelled
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.blockedReason, "irreversible");
+});

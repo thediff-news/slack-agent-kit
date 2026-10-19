@@ -65,10 +65,12 @@ export class HeuristicPlanner implements ModelProvider {
     let m = /(?:go to|open|navigate to|visit)\s+(https?:\/\/\S+|\S+\.\S+)/i.exec(g);
     if (m && obs.stepCount === 0) {
       const url = m[1].startsWith("http") ? m[1] : `https://${m[1]}`;
-      this.queue.push({ kind: "dismissPopups" }, { kind: "screenshot" });
+      this.queue.push({ kind: "dismissPopups" });
       const rest = g.slice(g.indexOf(m[1]) + m[1].length).trim();
+      const cm = /(?:^|and\s+)click\s+(?:the\s+)?(?:button\s+|link\s+)?["']?([^"']+?)["']?$/i.exec(rest);
+      if (cm) this.queue.push({ kind: "click", target: { text: cm[1].trim() } });
       if (/^(and\s+)?(read|summari[sz]e|extract)/i.test(rest)) this.queue.push({ kind: "extract" });
-      this.queue.push({ kind: "done", summary: "goal steps issued" });
+      this.queue.push({ kind: "screenshot" }, { kind: "done", summary: "goal steps issued" });
       return { kind: "navigate", url };
     }
     m = /click\s+(?:the\s+)?(?:button\s+|link\s+)?["']?([^"']+?)["']?$/i.exec(g);
