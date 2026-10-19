@@ -15,7 +15,7 @@ Slack API -> Your Apps -> Create New App -> **From a manifest**, paste:
   },
   "oauth_config": {
     "scopes": {
-      "bot": ["app_mentions:read", "channels:history", "groups:history", "chat:write", "im:history"]
+      "bot": ["app_mentions:read", "channels:history", "groups:history", "chat:write", "im:history", "files:write"]
     }
   },
   "settings": {
