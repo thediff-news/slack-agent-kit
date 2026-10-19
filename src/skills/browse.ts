@@ -21,6 +21,12 @@ export interface BrowseSkillOptions {
 }
 
 const CMD = /^browse\s+(.+)/is;
+const MENTION = /^(?:<@[A-Z0-9]+>\s*)+/i;
+
+function goalOf(text: string): string | undefined {
+  const m = CMD.exec(text.trim().replace(MENTION, ""));
+  return m?.[1].trim();
+}
 
 export class BrowseSkill implements Skill {
   name = "browse";
@@ -30,11 +36,11 @@ export class BrowseSkill implements Skill {
   constructor(private opts: BrowseSkillOptions = {}) {}
 
   matches(event: AgentEvent): boolean {
-    return CMD.test(event.text.trim());
+    return goalOf(event.text) !== undefined;
   }
 
   async handle(event: AgentEvent, ctx: SkillContext): Promise<SkillResult> {
-    const goal = CMD.exec(event.text.trim())![1].trim();
+    const goal = goalOf(event.text)!;
     if (!ctx.askApproval) {
       return { findings: "browse needs an approval-capable runtime (askApproval missing)", actions: [] };
     }

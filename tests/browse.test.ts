@@ -258,10 +258,11 @@ test("browse skill: matches 'browse <goal>', runs end-to-end, posts screenshot, 
   const rag = new Rag(join(dir, "r.db"), new HashingEmbedder(256));
   const skill = new BrowseSkill({ allowlist: ["example.com"], screenshotDir: dir });
   assert.ok(skill.matches({ text: `browse go to ${base}/status and read it` } as any));
+  assert.ok(skill.matches({ text: `<@U0CAELXUH2N> browse go to ${base}/status and read it` } as any)); // Slack mention prefix
   assert.ok(!skill.matches({ text: "what is the refund policy" } as any));
 
   const { ctx, files } = mockCtx(store, audit, rag, [true]); // approve the 127.0.0.1 allowlist add
-  const result = await skill.handle({ text: `browse go to ${base}/status and read it`, actorId: "U1", id: "e1" } as any, ctx);
+  const result = await skill.handle({ text: `<@U0CAELXUH2N> browse go to ${base}/status and read it`, actorId: "U1", id: "e1" } as any, ctx);
   assert.match(result.findings, /Browse done/);
   assert.ok(files.length >= 1, "screenshot posted");
   const stored = JSON.parse((await store.get("browse", "allowlist"))!);
