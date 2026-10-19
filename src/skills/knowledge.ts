@@ -35,7 +35,9 @@ export class KnowledgeSkill implements Skill {
       // `ingest <path>` reads via the docs connector; `ingest <connector>:<id>`
       // (e.g. `ingest jira:PROJ-123`, `ingest notion:<page-id>`) reads any
       // configured connector by name.
-      let target = ingestMatch[1];
+      // Slack auto-linkifies URLs into mrkdwn: <https://x> or <https://x|label>.
+      // Unwrap so connectors see the bare target.
+      let target = ingestMatch[1].replace(/^<([^>|]+)(?:\|[^>]*)?>$/, "$1");
       let connector = ctx.connectors["docs"];
       const prefixed = /^([a-z0-9_-]+):(.+)$/i.exec(target);
       if (prefixed && ctx.connectors[prefixed[1]]) {
