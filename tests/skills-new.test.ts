@@ -74,7 +74,7 @@ test("company-brain: ingest unwraps Slack mrkdwn links (<url> and <url|label>)",
   const ctx = makeCtx(dir);
   writeFileSync(join(dir, "docs", "page.md"), "Runbook body.");
   const skill = new KnowledgeSkill();
-  for (const raw of ["ingest <page.md>", "ingest <page.md|page.md>"]) {
+  for (const raw of ["ingest <page.md>", "ingest <page.md|page.md>", "ingest docs:<page.md>"]) {
     const result = await skill.handle(cliEvent(raw), ctx);
     assert.equal(result.actions.length, 1, raw);
     assert.match(result.actions[0].summary, /Ingest page\.md/);
