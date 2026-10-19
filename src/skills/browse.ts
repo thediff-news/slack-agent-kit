@@ -81,9 +81,15 @@ export class BrowseSkill implements Skill {
         await ctx.store.set("browse", "allowlist", JSON.stringify(allowlist));
       }
 
-      // post screenshots in-thread
+      // post screenshots in-thread; upload failure must never eat the findings
+      let uploadsFailed = false;
       for (const shot of result.screenshots.slice(0, 6)) {
-        await ctx.replyFile?.(shot, `browse step screenshot`);
+        try {
+          await ctx.replyFile?.(shot, `browse step screenshot`);
+        } catch (e) {
+          uploadsFailed = true;
+          ctx.audit.record("browse_upload_failed", event.actorId, (e as Error).message.slice(0, 200));
+        }
       }
 
       const logText = result.steps
@@ -93,6 +99,7 @@ export class BrowseSkill implements Skill {
         result.ok ? `*Browse done:* ${result.summary}` : `*Browse stopped:* ${result.summary}`,
         `_planner: ${planner.name} - ${result.steps.length} step(s)${result.blockedReason ? ` - blocked: ${result.blockedReason}` : ""}_`,
         logText ? "```" + logText.slice(0, 2800) + "```" : "",
+        uploadsFailed ? `_(${result.screenshots.length} screenshot(s) taken but upload failed - the Slack app needs the files:write scope)_` : "",
       ].filter(Boolean).join("\n");
       ctx.audit.record("browse_end", event.actorId, `${event.id}: ok=${result.ok} steps=${result.steps.length} ${result.summary.slice(0, 120)}`);
       return { findings, actions: [] };
