@@ -34,6 +34,10 @@ export interface SkillContext {
   enrich(query: string, k?: number): Promise<string>;
   /** Knowledge-base ACL tags this user may see ("public" always included). */
   aclsFor(userId: string): string[];
+  /** Post a file (e.g. a screenshot) back to the channel/thread. Slack-only. */
+  replyFile?(path: string, caption?: string): Promise<void>;
+  /** Mid-skill approval gate (browse allowlist adds, irreversible clicks). */
+  askApproval?(summary: string): Promise<boolean>;
   /** Optional hosted LLM (e.g. OpenAI, enabled via env). Undefined in the keyless kit. */
   llm?: Llm;
 }

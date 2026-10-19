@@ -21,6 +21,9 @@ import { ConfluenceConnector } from "./connectors/confluence.js";
 import { NotionConnector } from "./connectors/notion.js";
 import { WebConnector } from "./connectors/web.js";
 import { SlackHistoryConnector } from "./connectors/slack-history.js";
+import { BrowseSkill, type BrowseSkillOptions } from "./skills/browse.js";
+import { randomUUID } from "node:crypto";
+import type { Approval } from "./core/store.js";
 import type { Connector } from "./connectors/types.js";
 import { SyncEngine } from "./core/sync.js";
 import { CredentialTriageSkill } from "./skills/credential-triage.js";
@@ -102,6 +105,8 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   registry.register(new SupportTriageSkill());
   const routerCfg = (config.skills?.["alert-router"] ?? {}) as { routing?: Record<string, string>; escalateThreshold?: number };
   registry.register(new AlertRouterSkill(routerCfg.routing ?? {}, routerCfg.escalateThreshold ?? 3));
+  const browseCfg = (config.skills?.["browse"] ?? {}) as BrowseSkillOptions;
+  registry.register(new BrowseSkill(browseCfg));
 
   const makeSkillContext = (event: AgentEvent): SkillContext => ({
     store, audit, rag, connectors, config, llm: openai?.llm,
@@ -111,6 +116,23 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
       return hits.map((h) => `- (${h.source}, ingested ${h.ingestedAt}) ${h.text.slice(0, 300)}`).join("\n");
     },
     aclsFor: (userId) => permissions.aclsFor(userId),
+    replyFile: hooks.upload ? (path, caption) => hooks.upload!(event, path, caption) : undefined,
+    askApproval: async (summary) => {
+      const approval: Approval = {
+        id: randomUUID(),
+        actionKey: `ask:${randomUUID()}`,
+        summary,
+        requestedBy: event.actorId,
+        requestedAt: new Date().toISOString(),
+        status: "pending",
+      };
+      await store.createApproval(approval);
+      audit.record("approval_requested", event.actorId, `${approval.id}: ${summary}`);
+      const decision = await hooks.requestApproval(approval, event);
+      await store.resolveApproval(approval.id, decision, "approver");
+      audit.record("approval_resolved", "approver", `${approval.id}: ${decision}`);
+      return decision === "approved";
+    },
   });
 
   const runtime = new Runtime(store, audit, permissions, registry, config, hooks, makeSkillContext);

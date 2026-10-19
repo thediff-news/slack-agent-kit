@@ -64,6 +64,15 @@ async function main() {
       });
       return new Promise((resolve) => pending.set(approval.id, resolve));
     },
+    async upload(event, path, caption) {
+      await app.client.files.uploadV2({
+        channel_id: event.channelId,
+        ...(event.threadId ? { thread_ts: event.threadId } : {}),
+        file: path,
+        filename: path.split("/").pop(),
+        initial_comment: caption,
+      } as any);
+    },
   };
 
   const kit = await buildRuntime(process.env.KIT_CONFIG ?? "kit.config.yaml", hooks);

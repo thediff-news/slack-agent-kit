@@ -11,6 +11,8 @@ export interface RuntimeHooks {
   notify(event: AgentEvent, text: string): Promise<void>;
   /** Ask a human to decide. Resolves with the approver's decision. */
   requestApproval(approval: Approval, event: AgentEvent): Promise<"approved" | "denied">;
+  /** Upload a file to the channel/thread (screenshots). Optional. */
+  upload?(event: AgentEvent, path: string, caption?: string): Promise<void>;
 }
 
 /**
