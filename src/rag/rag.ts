@@ -61,7 +61,8 @@ export class Rag {
       // at least one shared content token: pure hash collisions never surface
       .filter((r) => tokenize(r.text).some((t) => qTokens.has(t)))
       .map((r) => ({
-        source: r.source, text: r.text, acl: r.acl, ingestedAt: r.ingested_at,
+        // the `acl: <tag>` first line is ingest metadata, never answer content
+        source: r.source, text: r.text.replace(/^acl:\s*\S+[ \t]*\n+/, ""), acl: r.acl, ingestedAt: r.ingested_at,
         score: cosine(q, new Float32Array(r.embedding.buffer, r.embedding.byteOffset, this.embedder.dimensions)),
       }))
       .sort((a, b) => b.score - a.score)

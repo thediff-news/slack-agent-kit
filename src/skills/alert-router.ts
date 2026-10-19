@@ -6,7 +6,8 @@ import { actionKey } from "../core/runtime.js";
 /**
  * Reference skill: alert dedup + routing.
  * Trigger: a message starting with `alert:` (what monitoring webhooks post).
- * Fingerprints the alert (numbers/timestamps stripped), counts occurrences
+ * Fingerprints the alert (numbers stripped for the fingerprint ONLY -
+ * messages always show the original alert text), counts occurrences
  * durably, routes the first occurrence to the service owner from the kit
  * config's routing table, and proposes a GATED escalation when an alert
  * keeps refiring (default threshold: 3).
@@ -23,8 +24,11 @@ export class AlertRouterSkill implements Skill {
   }
 
   private fingerprint(text: string): { name: string; fp: string } {
-    const name = text.replace(/^alert:\s*/i, "").replace(/[0-9]+/g, "N").replace(/\s+/g, " ").trim().slice(0, 80);
-    return { name, fp: createHash("sha256").update(name.toLowerCase()).digest("hex").slice(0, 12) };
+    // name: original alert text, shown in messages. fp: dedup key, with
+    // numbers normalized out so "14% high" and "23% high" dedupe together.
+    const name = text.replace(/^alert:\s*/i, "").replace(/\s+/g, " ").trim().slice(0, 80);
+    const normalized = name.replace(/[0-9]+/g, "N");
+    return { name, fp: createHash("sha256").update(normalized.toLowerCase()).digest("hex").slice(0, 12) };
   }
 
   async handle(event: AgentEvent, ctx: SkillContext): Promise<SkillResult> {

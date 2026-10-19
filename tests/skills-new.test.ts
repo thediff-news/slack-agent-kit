@@ -112,9 +112,13 @@ test("alert-router: first routes, repeat dedups, third escalates with gated acti
   const skill = new AlertRouterSkill({ checkout: "@payments-oncall" }, 3);
   const first = await skill.handle(cliEvent("alert: checkout error rate 11% high"), ctx);
   assert.match(first.findings, /@payments-oncall/);
+  assert.match(first.findings, /11% high/);
   assert.equal(first.actions.length, 0);
   const second = await skill.handle(cliEvent("alert: checkout error rate 15% high"), ctx);
   assert.match(second.findings, /occurrence \*?2/);
+  // original alert text in messages; digit-normalization only feeds the fingerprint
+  assert.match(second.findings, /15% high/);
+  assert.doesNotMatch(second.findings, /N%/);
   assert.equal(second.actions.length, 0);
   const third = await skill.handle(cliEvent("alert: checkout error rate 21% high"), ctx);
   assert.match(third.findings, /occurrence \*?3/);

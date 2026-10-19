@@ -73,6 +73,12 @@ test("hashing embedder is deterministic and retrieves the right doc", async () =
   const hits = await rag.retrieve("what do we do when a key leaks?", 1);
   assert.equal(hits.length, 1);
   assert.equal(hits[0].source, "policy.md");
+  // the inline acl: tag line is metadata, stripped from retrieved text
+  await rag.ingest("secret.md", "acl: finance\n\nQ4 discounts are 18% annual.", "finance");
+  const tagged = await rag.retrieve("Q4 discounts", 1);
+  assert.ok(!tagged[0].text.includes("acl:"));
+  assert.match(tagged[0].text, /^Q4 discounts/);
+  assert.equal(tagged[0].acl, "finance");
   // idempotent ingest
   assert.equal(await rag.ingest("policy.md", "Credential rotation policy: revoke the leaked key at the provider first, then remove it from source."), 0);
   rag.close();
