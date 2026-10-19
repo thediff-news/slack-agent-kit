@@ -29,6 +29,13 @@ function toEvent(e: { ts: string; user?: string; channel: string; text?: string;
   };
 }
 
+
+async function replaceButtons(respond: any, text: string) {
+  try {
+    await respond({ replace_original: true, text });
+  } catch {}
+}
+
 async function main() {
   const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
@@ -60,20 +67,26 @@ async function main() {
 
   const kit = await buildRuntime(process.env.KIT_CONFIG ?? "kit.config.yaml", hooks);
 
-  app.action(/^approve:.+/, async ({ action, ack, body }) => {
+  app.action(/^approve:.+/, async ({ action, ack, body, respond }) => {
     await ack();
     const id = (action as any).action_id.split(":")[1];
-    if (!kit.permissions.canApprove((body as any).user?.id ?? "unknown")) return;
+    const who = (body as any).user?.id ?? "unknown";
+    if (!kit.permissions.canApprove(who)) return;
+    if (!pending.has(id)) return;
     pending.get(id)?.("approved");
     pending.delete(id);
+    await replaceButtons(respond, `Approved by <@${who}>`);
   });
 
-  app.action(/^deny:.+/, async ({ action, ack, body }) => {
+  app.action(/^deny:.+/, async ({ action, ack, body, respond }) => {
     await ack();
     const id = (action as any).action_id.split(":")[1];
-    if (!kit.permissions.canApprove((body as any).user?.id ?? "unknown")) return;
+    const who = (body as any).user?.id ?? "unknown";
+    if (!kit.permissions.canApprove(who)) return;
+    if (!pending.has(id)) return;
     pending.get(id)?.("denied");
     pending.delete(id);
+    await replaceButtons(respond, `Denied by <@${who}>`);
   });
 
   app.event("app_mention", async ({ event }) => {
