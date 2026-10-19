@@ -38,7 +38,7 @@ export class IncidentTriageSkill implements Skill {
    * deploy roots). Resolve each frame to a repo-relative path by trying
    * progressively shorter suffixes until git history matches. */
   private async repoPath(framePath: string): Promise<string | undefined> {
-    const parts = framePath.split(/[\/]/).filter(Boolean);
+    const parts = framePath.split(/[\\/]/).filter(Boolean);
     for (let i = 0; i < parts.length; i++) {
       const candidate = parts.slice(i).join("/");
       const hit = await this.git("log", "-1", "--format=%h", "--", candidate);

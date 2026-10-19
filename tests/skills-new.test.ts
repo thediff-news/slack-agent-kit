@@ -124,6 +124,25 @@ RuntimeError: boom`), ctx);
   ctx.store.close();
 });
 
+test("incident-triage: resolves Windows backslash frame paths to repo-relative", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kit-inc-win-"));
+  const repo = join(dir, "repo");
+  mkdirSync(join(repo, "httpx"), { recursive: true });
+  writeFileSync(join(repo, "httpx", "_client.py"), "x = 1\n");
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  execFileSync("git", ["add", "-A"], { cwd: repo });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add client"], { cwd: repo });
+  const ctx = makeCtx(dir);
+  const skill = new IncidentTriageSkill(repo);
+  const result = await skill.handle(cliEvent(`incident: prod crash
+Traceback (most recent call last):
+  File "C:\\Users\\User\\site-packages\\httpx\\_client.py", line 914, in send
+RuntimeError: deque mutated during iteration`), ctx);
+  assert.match(result.findings, /httpx\/_client\.py/);
+  assert.match(result.findings, /add client/);
+  ctx.store.close();
+});
+
 test("support-triage: classifies billing, drafts grounded reply, gates the send", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kit-sup-"));
   const ctx = makeCtx(dir);
