@@ -27,10 +27,15 @@ export interface Observation {
   text: string;       // already wrapped as untrusted
   suspiciousLines: string[];
   stepCount: number;
+  /** JPEG screenshot of the current page, base64. Present when the planner
+   * declares usesVision - pixel grounding on top of the text/tree. */
+  screenshotBase64?: string;
 }
 
 export interface ModelProvider {
   name: string;
+  /** When true, the loop attaches a base64 JPEG screenshot to every observation. */
+  usesVision?: boolean;
   plan(goal: string, obs: Observation, history: string[]): Promise<Step>;
 }
 
@@ -88,10 +93,15 @@ export class HeuristicPlanner implements ModelProvider {
  * BROWSE_MODEL_URL, BROWSE_MODEL_KEY, BROWSE_MODEL_NAME. Disabled otherwise. */
 export class HttpPlanner implements ModelProvider {
   name = "http";
-  constructor(private url: string, private key: string, private model: string, private maxSteps: number) {}
+  usesVision: boolean;
+  constructor(private url: string, private key: string, private model: string, private maxSteps: number, vision = false) {
+    this.usesVision = vision;
+  }
   static fromEnv(maxSteps: number): HttpPlanner | undefined {
     const url = process.env.BROWSE_MODEL_URL, key = process.env.BROWSE_MODEL_KEY, model = process.env.BROWSE_MODEL_NAME;
-    return url && key && model ? new HttpPlanner(url, key, model, maxSteps) : undefined;
+    if (!url || !key || !model) return undefined;
+    // vision on by default when a key exists; BROWSE_MODEL_VISION=0 opts out
+    return new HttpPlanner(url, key, model, maxSteps, process.env.BROWSE_MODEL_VISION !== "0");
   }
   async plan(goal: string, obs: Observation, history: string[]): Promise<Step> {
     const sys = [
@@ -108,6 +118,12 @@ export class HttpPlanner implements ModelProvider {
       `PAGE TEXT:\n${obs.text}`,
       history.length ? `HISTORY:\n${history.slice(-8).join("\n")}` : "",
     ].filter(Boolean).join("\n\n");
+    const userContent: unknown = obs.screenshotBase64
+      ? [
+          { type: "text", text: user },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${obs.screenshotBase64}` } },
+        ]
+      : user;
     const res = await fetch(this.url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.key}` },
@@ -115,7 +131,7 @@ export class HttpPlanner implements ModelProvider {
         model: this.model,
         messages: [
           { role: "system", content: sys },
-          { role: "user", content: user },
+          { role: "user", content: userContent },
         ],
         temperature: 0,
       }),

@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { BrowserSession } from "../src/browse/browser.js";
 import * as act from "../src/browse/actions.js";
 import { runLoop } from "../src/browse/loop.js";
-import { ScriptedPlanner, HeuristicPlanner } from "../src/browse/planner.js";
+import { ScriptedPlanner, HeuristicPlanner, HttpPlanner } from "../src/browse/planner.js";
 import { hostAllowed, hostOf, isIrreversibleLabel, wrapUntrusted, flagSuspicious, UNTRUSTED_CLOSE } from "../src/browse/guardrails.js";
 import { BrowseSkill } from "../src/skills/browse.js";
 import { SqliteStore } from "../src/core/store-sqlite.js";
@@ -269,4 +269,40 @@ test("browse skill: matches 'browse <goal>', runs end-to-end, posts screenshot, 
   const stored = JSON.parse((await store.get("browse", "allowlist"))!);
   assert.ok(stored.includes("127.0.0.1"), "gated addition persisted");
   await store.close(); rag.close();
+});
+
+test("HttpPlanner: vision observations ride along as image content; text-only without a screenshot", async () => {
+  const seen: any[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    seen.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"kind":"done","summary":"saw it"}' } }] }), { status: 200 });
+  }) as any;
+  try {
+    const p = new HttpPlanner("https://model.example/v1/chat", "k", "m", 10, true);
+    assert.equal(p.usesVision, true);
+    const obs = { url: "https://x", title: "t", ariaTree: "a", text: "b", suspiciousLines: [], stepCount: 0, screenshotBase64: "QUJD" };
+    const step = await p.plan("look at the page", obs, []);
+    assert.equal(step.kind, "done");
+    const content = seen[0].messages[1].content;
+    assert.ok(Array.isArray(content), "multipart content when screenshot present");
+    assert.equal(content[1].type, "image_url");
+    assert.ok(content[1].image_url.url.startsWith("data:image/jpeg;base64,QUJD"));
+
+    const step2 = await p.plan("look again", { ...obs, screenshotBase64: undefined }, []);
+    assert.equal(step2.kind, "done");
+    assert.equal(typeof seen[1].messages[1].content, "string", "plain string when no screenshot");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("loop: a vision planner receives a real base64 JPEG screenshot each step", async () => {
+  const planner = new ScriptedPlanner([{ kind: "navigate", url: `${base}/status` }, { kind: "done", summary: "ok" }]);
+  (planner as any).usesVision = true;
+  await runLoop(session, planner, "vision check", { allowlist: ["127.0.0.1"], gate: allow });
+  const withShot = planner.seen.filter((s) => s.obs.screenshotBase64);
+  assert.ok(withShot.length >= 1, "screenshot attached");
+  // JPEG magic bytes /9j/ in base64
+  assert.ok(withShot[0].obs.screenshotBase64!.startsWith("/9j/"));
 });

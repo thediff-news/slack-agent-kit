@@ -78,6 +78,12 @@ export async function runLoop(
       suspiciousLines: flagSuspicious(tree.detail + "\n" + text.detail),
       stepCount: n - 1,
     };
+    if (planner.usesVision) {
+      obs.screenshotBase64 = await page
+        .screenshot({ type: "jpeg", quality: 60 })
+        .then((b) => b.toString("base64"))
+        .catch(() => undefined);
+    }
 
     // PLAN
     let step: Step;
