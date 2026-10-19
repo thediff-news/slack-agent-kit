@@ -8,6 +8,7 @@ import { AuditLog } from "../src/core/audit.js";
 import { Permissions } from "../src/core/permissions.js";
 import { HashingEmbedder, cosine } from "../src/rag/embed.js";
 import { Rag } from "../src/rag/rag.js";
+import { stripAppMention } from "../src/core/events.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "kit-test-"));
 
@@ -82,4 +83,11 @@ test("hashing embedder is deterministic and retrieves the right doc", async () =
   // idempotent ingest
   assert.equal(await rag.ingest("policy.md", "Credential rotation policy: revoke the leaked key at the provider first, then remove it from source."), 0);
   rag.close();
+});
+
+test("stripAppMention removes a leading Slack mention, keeps the rest", () => {
+  assert.equal(stripAppMention("<@U0CAELXUH2N> ingest notion:abc123"), "ingest notion:abc123");
+  assert.equal(stripAppMention("  <@U123>  hello?"), "hello?");
+  assert.equal(stripAppMention("no mention here"), "no mention here");
+  assert.equal(stripAppMention("tell <@U123> later"), "tell <@U123> later");
 });

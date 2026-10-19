@@ -8,7 +8,7 @@
  * runs fully without them via the CLI harness (npm run demo).
  */
 import { App } from "@slack/bolt";
-import { makeEventId, type AgentEvent } from "../core/events.js";
+import { makeEventId, stripAppMention, type AgentEvent } from "../core/events.js";
 import type { Approval } from "../core/store.js";
 import type { RuntimeHooks } from "../core/runtime.js";
 import { buildRuntime } from "../kit.js";
@@ -90,7 +90,8 @@ async function main() {
   });
 
   app.event("app_mention", async ({ event }) => {
-    await kit.runtime.handleEvent(toEvent(event as any, "mention"));
+    const e = event as any;
+    await kit.runtime.handleEvent(toEvent({ ...e, text: stripAppMention(e.text ?? "") }, "mention"));
   });
 
   // Watch configured channels for top-level alerts (e.g. scanner bots posting).
