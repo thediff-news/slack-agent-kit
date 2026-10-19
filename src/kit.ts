@@ -1,6 +1,8 @@
 /** Composition root: wires config -> store -> audit -> RBAC -> RAG ->
  * connectors -> skills -> Runtime. Adapters (Slack, CLI) call buildRuntime
  * with their own hooks. */
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { loadConfig, type KitConfig } from "./core/config.js";
 import { SqliteStore } from "./core/store-sqlite.js";
 import type { DurableStore } from "./core/store.js";
@@ -40,6 +42,7 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
 
   // The pi-durable adapter is the foundation store; SQLite remains the
   // zero-friction default while pi-durable's API is experimental.
+  for (const f of [config.store.path, config.auditLogPath, config.rag.dbPath]) mkdirSync(dirname(f), { recursive: true });
   let store: DurableStore;
   if (config.store.driver === "pi-durable") {
     const { PiDurableStore } = await import("./core/store-pi.js"); // lazy: keeps node:sqlite warning off the default path
