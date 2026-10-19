@@ -42,9 +42,11 @@ Slack mention / watched channel / webhook / CLI
   resurfaced after a crash. Two store drivers: `sqlite` (default) and
   `pi-durable`.
 - **Connectors** (`src/connectors/`) - read-only pluggable sources: filesystem
-  (docs, runbooks, cloned repos), GitHub (`gh` CLI), Jira (JQL issue search),
-  Confluence (CQL page search) and Notion (search + page content). Add your
-  own behind the `Connector` interface.
+  (docs, runbooks, cloned repos), GitHub (code search, issues/PRs, file reads
+  via `gh`), web pages and RSS/Atom feeds (SSRF-guarded fetch), Slack channel
+  history (bot token), Jira (JQL issue search), Confluence (CQL page search)
+  and Notion (search + page content). Add your own behind the `Connector`
+  interface. Live-vs-mock status per connector: docs/LIVE_TESTING.md.
 - **RAG** (`src/rag/`) - ingest -> chunk -> embed -> retrieve, fully local:
   hashing embedder + SQLite store, no API key. Idempotent ingestion. Swap the
   `Embedder` interface for sentence-transformers or a hosted API when needed.
