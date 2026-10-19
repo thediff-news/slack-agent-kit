@@ -62,9 +62,9 @@ export class GitHubConnector implements SyncableConnector {
     const docs: SyncedDoc[] = [];
     for (const repo of this.repos) {
       try {
-        const args = ["api", `repos/${repo}/issues?state=all&per_page=${since ? 100 : 30}`, "--paginate"];
+        const args = ["api", `repos/${repo}/issues?state=all&per_page=${since ? 100 : 30}`]; // bounded to one page per repo; incremental by `since` cursor
         const { stdout } = await run("gh", args);
-        const issues = JSON.parse(`[${stdout.trim().replace(/\]\s*\[/g, ",").replace(/^[\s\[]+|[\s\]]+$/g, "")}]`.replace(/^\[\[/, "[").replace(/\]\]$/, "]")) as any[];
+        const issues = JSON.parse(stdout) as any[];
         for (const issue of issues) {
           if (issue.pull_request) continue;
           if (since && issue.updated_at && issue.updated_at <= since) continue;

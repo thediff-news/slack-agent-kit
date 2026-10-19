@@ -264,7 +264,7 @@ test("jira: sync list uses updated-since JQL and surfaces lastModified", async (
   assert.equal(full.complete, true);
   assert.equal(full.docs[0].id, "PROJ-123");
   assert.equal(full.docs[0].lastModified, "2026-10-17T09:00:00.000+0000");
-  assert.match(decodeURIComponent(calls[0].url).replace(/\+/g, ' '), /jql=ORDER BY updated DESC/);
+  assert.match(decodeURIComponent(calls[0].url).replace(/\+/g, ' '), /jql=created is not EMPTY ORDER BY updated DESC/); // Jira rejects unbounded JQL (live bug: bare ORDER BY returned 0 issues)
 
   const inc = await jira.list("2026-10-18T00:00:00.000Z");
   assert.equal(inc.complete, false); // incremental listings never reconcile deletions
@@ -321,4 +321,21 @@ test("notion: sync list sorts by last_edited_time, stops at the cursor, carries 
   const inc = await notion.list("2026-10-19T00:00:00.000Z");
   assert.deepEqual(inc.docs.map((d) => d.id), ["p1"]); // p2 older than cursor, pagination stops
   assert.equal(inc.complete, false);
+});
+
+test("notion: child_page blocks (title as string, not rich_text array) do not break get (live bug: rich.map is not a function)", async () => {
+  mockFetch([
+    ["/search", {
+      results: [{ id: "p1", object: "page", url: "https://notion.so/p1", last_edited_time: "2026-10-19T10:00:00.000Z",
+        properties: { title: { type: "title", title: [{ plain_text: "Handbook" }] } } }],
+      has_more: false, next_cursor: null,
+    }],
+    ["blocks/p1/children", { results: [
+      { type: "child_page", child_page: { title: "Onboarding" } },
+      { type: "paragraph", paragraph: { rich_text: [{ plain_text: "handbook body" }] } },
+    ], has_more: false }],
+  ]);
+  const notion = new NotionConnector("ntn_test", "public");
+  const full = await notion.list();
+  assert.match(full.docs[0].body, /handbook body/);
 });

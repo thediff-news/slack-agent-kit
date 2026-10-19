@@ -134,7 +134,8 @@ function pageTitle(page: any): string {
 function blockText(block: any): string {
   const data = block[block.type];
   const rich = data?.rich_text ?? data?.title ?? [];
-  const text = rich.map((t: any) => t.plain_text ?? "").join("");
+  const text =
+    typeof rich === "string" ? rich : rich.map((t: any) => t.plain_text ?? "").join("");
   if (!text) return "";
   return block.type === "to_do" ? `${data.checked ? "[x]" : "[ ]"} ${text}` : text;
 }

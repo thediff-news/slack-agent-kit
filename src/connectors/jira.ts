@@ -60,7 +60,7 @@ export class JiraConnector implements SyncableConnector {
     const cap = 200;
     const jql = since
       ? `updated >= "${jiraDate(since)}" ORDER BY updated DESC`
-      : "ORDER BY updated DESC";
+      : "created is not EMPTY ORDER BY updated DESC";
     const docs = await this.jql(jql, cap);
     return { docs: docs.map((d) => ({ ...d, lastModified: this.lastMod.get(d.id) })), complete: !since && docs.length < cap };
   }
