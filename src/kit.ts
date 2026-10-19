@@ -19,6 +19,8 @@ import { GitHubConnector } from "./connectors/github.js";
 import { JiraConnector } from "./connectors/jira.js";
 import { ConfluenceConnector } from "./connectors/confluence.js";
 import { NotionConnector } from "./connectors/notion.js";
+import { WebConnector } from "./connectors/web.js";
+import { SlackHistoryConnector } from "./connectors/slack-history.js";
 import type { Connector } from "./connectors/types.js";
 import { CredentialTriageSkill } from "./skills/credential-triage.js";
 import { KnowledgeSkill } from "./skills/knowledge.js";
@@ -61,6 +63,12 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   for (const [name, cfg] of Object.entries(config.connectors)) {
     if (cfg.type === "filesystem") connectors[name] = new FilesystemConnector(cfg.root);
     if (cfg.type === "github") connectors[name] = new GitHubConnector(cfg.repos.split(",").map((s) => s.trim()));
+    if (cfg.type === "web") connectors[name] = new WebConnector(cfg.acl ?? "public");
+    if (cfg.type === "slack-history") {
+      const token = process.env.SLACK_BOT_TOKEN ?? "";
+      if (token) connectors[name] = new SlackHistoryConnector(token, cfg.channels.split(",").map((s) => s.trim()), cfg.acl ?? "public");
+      else console.warn(`[connectors] ${name}: SLACK_BOT_TOKEN missing - disabled`);
+    }
     // SaaS connectors are env-gated: missing credentials disable the
     // connector with a warning, never a failure (keyless kit unaffected).
     if (cfg.type === "jira" || cfg.type === "confluence") {

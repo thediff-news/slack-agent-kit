@@ -4,3 +4,4 @@ data/
 .env
 examples/fixtures/incident-repo/
 examples/fixtures/target-repo/.git/
+kit.config.live.yaml
