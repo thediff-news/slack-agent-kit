@@ -19,8 +19,15 @@ export function htmlToText(html: string): string {
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|div|li|h[1-6]|tr|table|ul|ol)>/gi, "\n")
     .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    // Decode specific entities FIRST, &amp; LAST: a literal "&amp;ldquo;"
+    // must become "&ldquo;" (single decode), never a raw quote char.
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/&ldquo;|&rdquo;/g, '"').replace(/&lsquo;|&rsquo;/g, "'")
+    .replace(/&mdash;/g, "--").replace(/&ndash;/g, "-").replace(/&hellip;/g, "...")
+    .replace(/&#(x?[0-9a-fA-F]+);/g, (_m, code: string) =>
+      String.fromCodePoint(code[0].toLowerCase() === "x" ? parseInt(code.slice(1), 16) : parseInt(code, 10)))
+    .replace(/&amp;/g, "&")
     .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n")
     .trim();
 }

@@ -236,3 +236,21 @@ test("rag wiring: ingest jira:<key> through company-brain tags chunks with the c
   ctx.store.close();
   rag.close();
 });
+
+test("confluence: storage XHTML named entities are decoded (live bug: &ldquo; reached Slack as &amp;ldquo;)", async () => {
+  mockFetch([
+    ["content/458753", {
+      id: "458753", title: "Runbook",
+      body: { storage: { value: "<p>RuntimeError(&ldquo;deque mutated during iteration&rdquo;) &mdash; retry &amp;#39;safe&#39;</p>" } },
+      _links: { webui: "/spaces/X/pages/458753/Runbook" },
+    }],
+  ]);
+  const conf = new ConfluenceConnector("https://acme.atlassian.net", "bot@acme.com", "token-abc", "public");
+  const page = await conf.get("458753");
+  // Real named entities decode to actual characters...
+  assert.match(page?.body ?? "", /RuntimeError\("deque mutated during iteration"\) -- retry/);
+  // ...while "&amp;#39;" is a single-escaped entity: decodes once to "&#39;", never to a raw quote.
+  assert.ok((page?.body ?? "").includes("&#39;"));
+  assert.ok(!(page?.body ?? "").includes("&ldquo;"));
+  assert.ok(!(page?.body ?? "").includes("&amp;"));
+});
