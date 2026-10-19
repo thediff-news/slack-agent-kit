@@ -50,6 +50,12 @@ Slack mention / watched channel / webhook / CLI
 - **RAG** (`src/rag/`) - ingest -> chunk -> embed -> retrieve, fully local:
   hashing embedder + SQLite store, no API key. Idempotent ingestion. Swap the
   `Embedder` interface for sentence-transformers or a hosted API when needed.
+- **Automatic sync** (`src/core/sync.ts`) - configured connectors are crawled
+  on a schedule (incremental by last-modified where cheap): changed docs are
+  re-indexed, deleted docs drop out, and the approval policy is explicit -
+  no per-document gates for admin-configured connectors, one durable
+  approval for a connector's first sync, gated ACL re-tags, ungated
+  deletions. Policy and per-connector behavior: [docs/SYNC.md](docs/SYNC.md).
 - **RBAC** (`src/core/permissions.ts`) - roles per user, skill allow-lists per
   channel, named approvers. Mutating skills always require approval.
 - **Approval gates** - the agent proposes, a human decides, the decision is

@@ -22,6 +22,7 @@ import { NotionConnector } from "./connectors/notion.js";
 import { WebConnector } from "./connectors/web.js";
 import { SlackHistoryConnector } from "./connectors/slack-history.js";
 import type { Connector } from "./connectors/types.js";
+import { SyncEngine } from "./core/sync.js";
 import { CredentialTriageSkill } from "./skills/credential-triage.js";
 import { KnowledgeSkill } from "./skills/knowledge.js";
 import { IncidentTriageSkill } from "./skills/incident-triage.js";
@@ -37,6 +38,8 @@ export interface Kit {
   connectors: Record<string, Connector>;
   registry: SkillRegistry;
   runtime: Runtime;
+  /** Present only when config.sync is set. */
+  sync?: SyncEngine;
 }
 
 export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Promise<Kit> {
@@ -111,5 +114,6 @@ export async function buildRuntime(configPath: string, hooks: RuntimeHooks): Pro
   });
 
   const runtime = new Runtime(store, audit, permissions, registry, config, hooks, makeSkillContext);
-  return { config, store, audit, permissions, rag, connectors, registry, runtime };
+  const sync = config.sync ? new SyncEngine(store, audit, rag, connectors) : undefined;
+  return { config, store, audit, permissions, rag, connectors, registry, runtime, sync };
 }

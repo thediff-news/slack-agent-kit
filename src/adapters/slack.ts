@@ -11,6 +11,7 @@ import { App } from "@slack/bolt";
 import { makeEventId, stripAppMention, type AgentEvent } from "../core/events.js";
 import type { Approval } from "../core/store.js";
 import type { RuntimeHooks } from "../core/runtime.js";
+import type { ProposedAction } from "../core/skills.js";
 import { buildRuntime } from "../kit.js";
 
 const pending = new Map<string, (d: "approved" | "denied") => void>();
@@ -107,6 +108,36 @@ async function main() {
 
   await app.start();
   console.log("slack-agent-kit listening (Socket Mode)");
+
+  // Automatic connector sync (docs/SYNC.md): scheduled crawl of every
+  // syncable configured connector. First sync per connector and any ACL
+  // re-tag go through the same approval gate as skill actions.
+  if (kit.sync && kit.config.sync) {
+    const syncCfg = kit.config.sync;
+    const intervalMs = Math.max(1, syncCfg.intervalMinutes ?? 15) * 60_000;
+    const syncEvent: AgentEvent = {
+      id: makeEventId("sync", "timer"),
+      source: "sync",
+      kind: "timer",
+      actorId: "sync-engine",
+      channelId: syncCfg.notifyChannel ?? "",
+      text: "scheduled connector sync",
+      receivedAt: new Date().toISOString(),
+    };
+    const runSync = async () => {
+      try {
+        const results = await kit.sync!.runOnce((action: ProposedAction) => kit.runtime.executeProposed(action, syncEvent));
+        for (const r of results) {
+          if (r.error || r.ingested || r.deleted || r.gated.length) console.log("[sync]", JSON.stringify(r));
+        }
+      } catch (e) {
+        console.warn("[sync] run failed:", e instanceof Error ? e.message : e);
+      }
+    };
+    setTimeout(runSync, 5_000); // first pass right after boot
+    setInterval(runSync, intervalMs);
+    console.log(`[sync] scheduled every ${intervalMs / 60000} minute(s)`);
+  }
 }
 
 main().catch((err) => {

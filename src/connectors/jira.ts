@@ -1,4 +1,4 @@
-import type { Connector, ConnectorDoc } from "./types.js";
+import type { ConnectorDoc, SyncableConnector, SyncedDoc, SyncListing } from "./types.js";
 import { adfToText } from "./text.js";
 
 /**
@@ -11,7 +11,7 @@ import { adfToText } from "./text.js";
  * The token inherits the Atlassian account's permissions - the kit maps
  * nothing; every doc carries this connector's configured default ACL.
  */
-export class JiraConnector implements Connector {
+export class JiraConnector implements SyncableConnector {
   name = "jira";
 
   constructor(
@@ -35,6 +35,10 @@ export class JiraConnector implements Connector {
     const jql = query.startsWith("jql:")
       ? query.slice(4).trim()
       : `text ~ "${query.replace(/"/g, '\\"')}" ORDER BY updated DESC`;
+    return this.jql(jql, limit);
+  }
+
+  private async jql(jql: string, limit: number): Promise<ConnectorDoc[]> {
     const docs: ConnectorDoc[] = [];
     let nextPageToken: string | undefined;
     do {
@@ -50,6 +54,19 @@ export class JiraConnector implements Connector {
     return docs.slice(0, limit);
   }
 
+  /** Sync listing: all issues (bounded at 200), or only those updated since
+   * the cursor. Jira's `updated` field is the incremental marker. */
+  async list(since?: string): Promise<SyncListing> {
+    const cap = 200;
+    const jql = since
+      ? `updated >= "${jiraDate(since)}" ORDER BY updated DESC`
+      : "ORDER BY updated DESC";
+    const docs = await this.jql(jql, cap);
+    return { docs: docs.map((d) => ({ ...d, lastModified: this.lastMod.get(d.id) })), complete: !since && docs.length < cap };
+  }
+
+  private lastMod = new Map<string, string>();
+
   async get(id: string): Promise<ConnectorDoc | undefined> {
     const key = id.trim().toUpperCase();
     const res = await fetch(`${this.site}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,status,priority,updated,issuetype`, { headers: this.headers() });
@@ -59,6 +76,7 @@ export class JiraConnector implements Connector {
 
   private toDoc(issue: any): ConnectorDoc {
     const f = issue.fields ?? {};
+    if (issue.key && f.updated) this.lastMod.set(issue.key, f.updated);
     const body = [
       `Status: ${f.status?.name ?? "?"} | Priority: ${f.priority?.name ?? "?"} | Type: ${f.issuetype?.name ?? "?"} | Updated: ${f.updated ?? "?"}`,
       "",
@@ -72,4 +90,11 @@ export class JiraConnector implements Connector {
       acl: this.defaultAcl,
     };
   }
+}
+
+/** Jira JQL datetime: "yyyy/MM/dd HH:mm". */
+function jiraDate(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}/${p(d.getUTCMonth() + 1)}/${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }

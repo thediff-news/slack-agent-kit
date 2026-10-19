@@ -11,6 +11,8 @@ export interface KitConfig {
   approval: { timeoutMinutes: number };
   /** Free-form per-skill config, keyed by skill name. */
   skills: Record<string, Record<string, unknown>>;
+  /** Automatic connector sync (docs/SYNC.md). Absent = sync disabled. */
+  sync?: { intervalMinutes?: number; notifyChannel?: string };
 }
 
 export function loadConfig(path: string): KitConfig {

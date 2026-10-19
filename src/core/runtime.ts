@@ -64,6 +64,12 @@ export class Runtime {
     }
   }
 
+  /** Public entry for out-of-band proposers (e.g. the sync engine): same
+   * approval gate + idempotent execute + audit as skill-proposed actions. */
+  async executeProposed(action: ProposedAction, event: AgentEvent): Promise<void> {
+    return this.gateAndExecute(action, event);
+  }
+
   private async gateAndExecute(action: ProposedAction, event: AgentEvent): Promise<void> {
     if (action.tier === "mutating") {
       const approval: Approval = {

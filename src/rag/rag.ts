@@ -70,6 +70,19 @@ export class Rag {
       .filter((r) => r.score > 0.05);
   }
 
+  /** Sync path: drop every stored chunk for a source, then ingest fresh.
+   * Used when a source document changed - stale chunks never survive. */
+  async replace(source: string, text: string, acl = "public"): Promise<number> {
+    this.db.prepare("DELETE FROM chunks WHERE source = ?").run(source);
+    return this.ingest(source, text, acl);
+  }
+
+  /** Drop a source from the index entirely (deleted upstream). Returns the
+   * number of chunks removed. */
+  remove(source: string): number {
+    return this.db.prepare("DELETE FROM chunks WHERE source = ?").run(source).changes;
+  }
+
   count(): number {
     return (this.db.prepare("SELECT COUNT(*) AS n FROM chunks").get() as any).n;
   }

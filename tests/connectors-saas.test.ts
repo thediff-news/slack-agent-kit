@@ -254,3 +254,71 @@ test("confluence: storage XHTML named entities are decoded (live bug: &ldquo; re
   assert.ok(!(page?.body ?? "").includes("&ldquo;"));
   assert.ok(!(page?.body ?? "").includes("&amp;"));
 });
+
+test("jira: sync list uses updated-since JQL and surfaces lastModified", async () => {
+  mockFetch([
+    ["search/jql", { issues: [JIRA_ISSUE], isLast: true }],
+  ]);
+  const jira = new JiraConnector("https://acme.atlassian.net", "bot@acme.com", "token-abc", "finance");
+  const full = await jira.list();
+  assert.equal(full.complete, true);
+  assert.equal(full.docs[0].id, "PROJ-123");
+  assert.equal(full.docs[0].lastModified, "2026-10-17T09:00:00.000+0000");
+  assert.match(decodeURIComponent(calls[0].url).replace(/\+/g, ' '), /jql=ORDER BY updated DESC/);
+
+  const inc = await jira.list("2026-10-18T00:00:00.000Z");
+  assert.equal(inc.complete, false); // incremental listings never reconcile deletions
+  assert.match(decodeURIComponent(calls[1].url).replace(/\+/g, ' '), /jql=updated >= "2026\/10\/18 00:00" ORDER BY updated DESC/);
+});
+
+test("confluence: sync list uses lastmodified-since CQL and version.when as lastModified", async () => {
+  mockFetch([
+    ["content/search", {
+      results: [{
+        id: "458753", type: "page", title: "Runbook",
+        version: { when: "2026-10-19T19:00:00.000Z" },
+        body: { storage: { value: "<p>Runbook body.</p>" } },
+        _links: { webui: "/spaces/X/pages/458753/Runbook" },
+      }],
+      start: 0, limit: 25, size: 1, _links: {},
+    }],
+  ]);
+  const conf = new ConfluenceConnector("https://acme.atlassian.net", "bot@acme.com", "token-abc", "public");
+  const full = await conf.list();
+  assert.equal(full.complete, true);
+  assert.equal(full.docs[0].lastModified, "2026-10-19T19:00:00.000Z");
+  assert.match(decodeURIComponent(calls[0].url).replace(/\+/g, ' '), /cql=type = page ORDER BY lastmodified DESC/);
+
+  const inc = await conf.list("2026-10-18T12:00:00.000Z");
+  assert.equal(inc.complete, false);
+  assert.match(decodeURIComponent(calls[1].url).replace(/\+/g, ' '), /lastmodified >= "2026-10-18 12:00"/);
+});
+
+test("notion: sync list sorts by last_edited_time, stops at the cursor, carries lastModified", async () => {
+  mockFetch([
+    ["/search", {
+      results: [
+        { id: "p1", object: "page", url: "https://notion.so/p1", last_edited_time: "2026-10-19T10:00:00.000Z",
+          properties: { title: { type: "title", title: [{ plain_text: "Newer page" }] } } },
+        { id: "p2", object: "page", url: "https://notion.so/p2", last_edited_time: "2026-10-18T10:00:00.000Z",
+          properties: { title: { type: "title", title: [{ plain_text: "Older page" }] } } },
+      ],
+      has_more: false, next_cursor: null,
+    }],
+    ["blocks/p1/children", { results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "p1 body" }] } }], has_more: false }],
+    ["blocks/p2/children", { results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "p2 body" }] } }], has_more: false }],
+  ]);
+  const notion = new NotionConnector("ntn_test", "public");
+
+  const full = await notion.list();
+  assert.equal(full.complete, true);
+  assert.deepEqual(full.docs.map((d) => d.id), ["p1", "p2"]);
+  assert.equal(full.docs[0].body, "p1 body");
+  assert.equal(full.docs[0].lastModified, "2026-10-19T10:00:00.000Z");
+  const searchBody = JSON.parse(String(calls.find((c) => c.url.includes("/search"))!.init!.body));
+  assert.deepEqual(searchBody.sort, { direction: "descending", timestamp: "last_edited_time" });
+
+  const inc = await notion.list("2026-10-19T00:00:00.000Z");
+  assert.deepEqual(inc.docs.map((d) => d.id), ["p1"]); // p2 older than cursor, pagination stops
+  assert.equal(inc.complete, false);
+});

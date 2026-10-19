@@ -1,4 +1,4 @@
-import type { Connector, ConnectorDoc } from "./types.js";
+import type { ConnectorDoc, SyncableConnector, SyncedDoc, SyncListing } from "./types.js";
 
 const API = "https://api.notion.com/v1";
 // Long-stable API version; override with NOTION_API_VERSION if needed.
@@ -15,7 +15,7 @@ const NOTION_VERSION = process.env.NOTION_API_VERSION ?? "2022-06-28";
  * with it; page-level permissions are not mapped, every doc carries this
  * connector's configured default ACL.
  */
-export class NotionConnector implements Connector {
+export class NotionConnector implements SyncableConnector {
   name = "notion";
 
   constructor(private apiKey: string, private defaultAcl = "notion") {}
@@ -62,7 +62,10 @@ export class NotionConnector implements Connector {
     const pageRes = await fetch(`${API}/pages/${encodeURIComponent(id)}`, { headers: this.headers() });
     if (!pageRes.ok) return undefined;
     const page = (await pageRes.json()) as any;
+    return { id: page.id, title: pageTitle(page), body: await this.pageContent(id), url: page.url, acl: this.defaultAcl };
+  }
 
+  private async pageContent(id: string): Promise<string> {
     const lines: string[] = [];
     let startCursor: string | undefined;
     do {
@@ -77,8 +80,47 @@ export class NotionConnector implements Connector {
       }
       startCursor = data.has_more ? data.next_cursor : undefined;
     } while (startCursor);
+    return lines.join("\n");
+  }
 
-    return { id: page.id, title: pageTitle(page), body: lines.join("\n"), url: page.url, acl: this.defaultAcl };
+  /** Sync listing: every page shared with the integration (bounded at 100),
+   * sorted by last_edited_time. With a cursor, only pages edited after it -
+   * the sort lets us stop paging as soon as we pass the cursor. */
+  async list(since?: string): Promise<SyncListing> {
+    const cap = 100;
+    const docs: SyncedDoc[] = [];
+    let startCursor: string | undefined;
+    let hitCursor = false;
+    do {
+      const res = await fetch(`${API}/search`, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify({
+          filter: { property: "object", value: "page" },
+          sort: { direction: "descending", timestamp: "last_edited_time" },
+          page_size: Math.min(cap - docs.length, 100),
+          ...(startCursor ? { start_cursor: startCursor } : {}),
+        }),
+      });
+      if (!res.ok) break;
+      const data = (await res.json()) as any;
+      for (const page of data.results ?? []) {
+        const edited = page.last_edited_time as string | undefined;
+        if (since && edited && edited <= since) { hitCursor = true; break; }
+        docs.push({
+          id: page.id,
+          title: pageTitle(page),
+          body: await this.pageContent(page.id),
+          url: page.url,
+          acl: this.defaultAcl,
+          lastModified: edited,
+        });
+        if (docs.length >= cap) break;
+      }
+      if (hitCursor || docs.length >= cap) break;
+      startCursor = data.has_more ? data.next_cursor : undefined;
+    } while (startCursor);
+    return { docs, complete: !since && !hitCursor && docs.length < cap };
   }
 }
 

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { Connector, ConnectorDoc } from "./types.js";
+import type { ConnectorDoc, SyncableConnector, SyncedDoc, SyncListing } from "./types.js";
 
 const run = promisify(execFile);
 
@@ -15,7 +15,7 @@ const run = promisify(execFile);
  *  - thediff-news/slack-agent-kit/issues/3    (issue)
  *  - thediff-news/slack-agent-kit/pull/7      (pull request)
  */
-export class GitHubConnector implements Connector {
+export class GitHubConnector implements SyncableConnector {
   name = "github";
 
   constructor(private repos: string[]) {}
@@ -52,6 +52,35 @@ export class GitHubConnector implements Connector {
       }
     }
     return docs.slice(0, limit);
+  }
+
+  /** Sync listing: open+closed ISSUES per configured repo (PRs excluded),
+   * updated-since cursor when given. Incremental-only: the listing is never
+   * treated as complete, so deleted issues are not reconciled (see
+   * docs/SYNC.md). Initial crawl is capped at 30 issues per repo. */
+  async list(since?: string): Promise<SyncListing> {
+    const docs: SyncedDoc[] = [];
+    for (const repo of this.repos) {
+      try {
+        const args = ["api", `repos/${repo}/issues?state=all&per_page=${since ? 100 : 30}`, "--paginate"];
+        const { stdout } = await run("gh", args);
+        const issues = JSON.parse(`[${stdout.trim().replace(/\]\s*\[/g, ",").replace(/^[\s\[]+|[\s\]]+$/g, "")}]`.replace(/^\[\[/, "[").replace(/\]\]$/, "]")) as any[];
+        for (const issue of issues) {
+          if (issue.pull_request) continue;
+          if (since && issue.updated_at && issue.updated_at <= since) continue;
+          docs.push({
+            id: `${repo}/issues/${issue.number}`,
+            title: `#${issue.number} ${issue.title}`,
+            body: `State: ${issue.state} | Updated: ${issue.updated_at}\n\n${issue.body ?? ""}`,
+            url: issue.html_url,
+            lastModified: issue.updated_at,
+          });
+        }
+      } catch {
+        // repo unreachable or gh unauthenticated: skip, never fail the sync
+      }
+    }
+    return { docs, complete: false };
   }
 
   async get(id: string): Promise<ConnectorDoc | undefined> {

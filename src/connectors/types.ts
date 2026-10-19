@@ -18,3 +18,28 @@ export interface ConnectorDoc {
    * explicit `acl:` first line in the body still wins on ingest. */
   acl?: string;
 }
+
+/** A doc returned by a sync listing, with its source-side modification time
+ * (ISO string) when the source exposes one. */
+export interface SyncedDoc extends ConnectorDoc {
+  lastModified?: string;
+}
+
+export interface SyncListing {
+  docs: SyncedDoc[];
+  /** true when the listing covers every doc the connector can see, so the
+   * sync engine may delete index entries that are missing from it. false
+   * for incremental (since-cursor) or capped listings. */
+  complete: boolean;
+}
+
+/** A connector that can be crawled automatically by the sync engine. */
+export interface SyncableConnector extends Connector {
+  /** List docs visible to this connector, optionally only those modified
+   * after `since` (ISO string from the previous sync run). */
+  list(since?: string): Promise<SyncListing>;
+}
+
+export function isSyncable(c: Connector): c is SyncableConnector {
+  return typeof (c as SyncableConnector).list === "function";
+}

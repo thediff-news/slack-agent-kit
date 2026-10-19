@@ -105,3 +105,25 @@ test("slack-history connector: unreadable channel yields no hits, no throw", asy
     assert.equal(await c.get("C1/1.2"), undefined);
   });
 });
+
+test("slack-history connector: sync list returns one rolling doc per channel, oldest first, newest ts as lastModified", async () => {
+  const fakeApi = (req: any, res: any) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, messages: [
+      { ts: "111.222", user: "U1", text: "deploy runbook is up" },
+      { ts: "111.111", user: "U2", text: "lunch?" },
+      { ts: "111.000", subtype: "bot_message", text: "noise" },
+    ] }));
+  };
+  await withServer(fakeApi, async (base) => {
+    const c = new SlackHistoryConnector("xoxb-test", ["C1"], "engineering", base);
+    const listing = await c.list();
+    assert.equal(listing.complete, true);
+    assert.equal(listing.docs.length, 1);
+    const doc = listing.docs[0];
+    assert.equal(doc.id, "C1");
+    assert.equal(doc.acl, "engineering");
+    assert.match(doc.body, /^U2: lunch\?\nU1: deploy runbook is up$/); // oldest first, bot noise dropped
+    assert.equal(doc.lastModified, new Date(111.222 * 1000).toISOString());
+  });
+});

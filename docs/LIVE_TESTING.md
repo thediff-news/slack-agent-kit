@@ -58,3 +58,10 @@ Notion. Connectors are unit-tested against recorded API shapes only.
 - CLI demo harness, credential-triage demo, ACL hardening (f678d6a),
   display fixes (4941c67), approval buttons replaced with a decision line
   after click (d94abf0), data-dir creation on first run (8b22abc).
+
+## Connector sync (2026-10-19)
+
+- Sync engine policy covered by tests/sync.test.ts (first-sync gate, skip/replace, deletion on complete listings only, ACL re-tag gate, hostile inline acl line, per-connector failure isolation).
+- jira/confluence/notion list() covered by mock-HTTP tests (cursor JQL/CQL/search sort, lastModified surfacing). slack-history list() covered by a local-server test.
+- github list() shells out to `gh api`; no mock seam - exercised live only.
+- Live in the Slacking workspace: first-sync approvals for github/notion/jira/confluence/slack-history approved once, then scheduled sync ran without further gates; a Confluence page edit was picked up on the next sync tick and changed the bot's answer with no ingest command (see run notes in the task transcript).

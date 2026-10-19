@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-export type EventSource = "slack" | "cli" | "webhook";
-export type EventKind = "mention" | "channel_message" | "alert" | "approval_response";
+export type EventSource = "slack" | "cli" | "webhook" | "sync";
+export type EventKind = "mention" | "channel_message" | "alert" | "approval_response" | "timer";
 
 /** Normalized inbound event. Every adapter (Slack, CLI, webhook) produces these. */
 export interface AgentEvent {

@@ -1,4 +1,4 @@
-import type { Connector, ConnectorDoc } from "./types.js";
+import type { ConnectorDoc, SyncableConnector, SyncedDoc, SyncListing } from "./types.js";
 
 /**
  * Slack channel history connector: searches and reads messages from channels
@@ -10,7 +10,7 @@ import type { Connector, ConnectorDoc } from "./types.js";
  * manifest). Only messages the bot can already see are returned; the
  * connector stamps its configured ACL (default "public") on every document.
  */
-export class SlackHistoryConnector implements Connector {
+export class SlackHistoryConnector implements SyncableConnector {
   name = "slack-history";
 
   constructor(
@@ -55,6 +55,32 @@ export class SlackHistoryConnector implements Connector {
       }
     }
     return docs.slice(0, limit);
+  }
+
+  /** Sync listing: one rolling doc per configured channel holding its last
+   * 200 messages (oldest first). Ignores `since` - the doc set is the
+   * channel list itself, and unchanged histories are caught by content
+   * hash. Newest message ts is the doc's lastModified. */
+  async list(): Promise<SyncListing> {
+    const docs: SyncedDoc[] = [];
+    for (const channel of this.channels) {
+      try {
+        const data = await this.api("conversations.history", { channel, limit: "200" });
+        const messages = (data.messages ?? []).filter((m: any) => !m.subtype).reverse();
+        const newest = (data.messages ?? [])[0]?.ts as string | undefined;
+        docs.push({
+          id: channel,
+          title: `Slack history: ${channel}`,
+          body: messages.map((m: any) => `${m.user ?? m.bot_id ?? "?"}: ${m.text ?? ""}`).join("\n"),
+          url: `https://slack.com/archives/${channel}`,
+          acl: this.acl,
+          lastModified: newest ? new Date(parseFloat(newest) * 1000).toISOString() : undefined,
+        });
+      } catch {
+        // channel unreadable: skip, never fail the sync
+      }
+    }
+    return { docs, complete: true };
   }
 
   async get(id: string): Promise<ConnectorDoc | undefined> {
