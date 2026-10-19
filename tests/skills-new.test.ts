@@ -105,6 +105,25 @@ test("incident-triage: parses trace, names suspect commit, proposes gated fix", 
   ctx.store.close();
 });
 
+test("incident-triage: resolves site-packages frame paths to repo-relative", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kit-inc-abs-"));
+  const repo = join(dir, "repo");
+  mkdirSync(join(repo, "pkg"), { recursive: true });
+  writeFileSync(join(repo, "pkg", "mod.py"), "x = 1\n");
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  execFileSync("git", ["add", "-A"], { cwd: repo });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add mod"], { cwd: repo });
+  const ctx = makeCtx(dir);
+  const skill = new IncidentTriageSkill(repo);
+  const result = await skill.handle(cliEvent(`incident: prod crash
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/site-packages/pkg/mod.py", line 1, in <module>
+RuntimeError: boom`), ctx);
+  assert.match(result.findings, /pkg\/mod\.py/);
+  assert.match(result.findings, /add mod/);
+  ctx.store.close();
+});
+
 test("support-triage: classifies billing, drafts grounded reply, gates the send", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kit-sup-"));
   const ctx = makeCtx(dir);
