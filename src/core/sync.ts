@@ -102,8 +102,11 @@ export class SyncEngine {
       state.gateAskedAt = new Date().toISOString();
       await this.store.set("sync", `state:${name}`, JSON.stringify(state));
       let approved = false;
+      // Unique key per ask: the runtime dedupes executed action keys, so reusing
+      // the same key after a state reset made re-approvals impossible to execute
+      // (live bug: "Already executed earlier, not repeating" -> gate read as denied).
       await gate({
-        key: actionKey("sync-enable", name),
+        key: actionKey("sync-enable", name, state.gateAskedAt),
         tier: "mutating",
         summary: `Enable automatic scheduled sync for connector \`${name}\` - its docs will be indexed under its configured ACL, no per-document approvals`,
         run: async () => {

@@ -154,3 +154,27 @@ test("sync: a failing connector is audited and never blocks the others", async (
   assert.ok(rag.count() > 0);
   await store.close(); rag.close();
 });
+
+test("sync: re-ask after state reset uses a fresh action key, so a runtime that dedupes executed keys can still approve (live bug)", async () => {
+  const { store, audit, rag } = setup();
+  const conn = new FakeConnector("docs");
+  conn.push([{ id: "A", body: "alpha body" }]);
+  const engine = new SyncEngine(store, audit, rag, { docs: conn }, { reaskBackoffMs: 0, aclGateBackoffMs: 0 });
+  const seenKeys = new Set<string>();
+  const gate = async (a: ProposedAction) => {
+    if (seenKeys.has(a.key)) return; // runtime dedupe: never re-execute the same key
+    seenKeys.add(a.key);
+    await a.run();
+  };
+  await engine.runOnce(gate); // first approval executes
+  assert.ok(rag.count() > 0);
+  // state reset (bot data lost): new engine, same store wiped of sync state
+  await store.set("sync", "state:docs", JSON.stringify({ approved: false, docs: {}, runCount: 0 })); // state reset
+  const engine2 = new SyncEngine(store, audit, rag, { docs: conn }, { reaskBackoffMs: 0, aclGateBackoffMs: 0 });
+  conn.push([{ id: "A", body: "alpha body v3" }]);
+  await engine2.runOnce(gate); // re-ask must use a NEW key, so approval executes again
+  assert.equal(seenKeys.size, 2);
+  const hits = await rag.retrieve("alpha", 3);
+  assert.ok(hits[0].text.includes("v3"));
+  await store.close(); rag.close();
+});
