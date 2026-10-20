@@ -14,6 +14,9 @@ import type { RuntimeHooks } from "../core/runtime.js";
 import type { ProposedAction } from "../core/skills.js";
 import { buildRuntime } from "../kit.js";
 
+// This map only wakes up an approval flow that is still running in this
+// process. The durable approval record is authoritative, including after a
+// restart when there is no in-memory waiter.
 const pending = new Map<string, (d: "approved" | "denied") => void>();
 
 function toEvent(e: { ts: string; user?: string; channel: string; text?: string; thread_ts?: string }, kind: AgentEvent["kind"]): AgentEvent {
@@ -49,20 +52,31 @@ async function main() {
       await app.client.chat.postMessage({ channel: event.channelId, thread_ts: event.threadId, text });
     },
     async requestApproval(approval: Approval, event: AgentEvent) {
-      await app.client.chat.postMessage({
-        channel: event.channelId,
-        thread_ts: event.threadId,
-        text: `Approval needed: ${approval.summary}`,
-        blocks: [{
-          type: "actions",
-          block_id: `gate-${approval.id}`,
-          elements: [
-            { type: "button", text: { type: "plain_text", text: "Approve" }, style: "primary", action_id: `approve:${approval.id}` },
-            { type: "button", text: { type: "plain_text", text: "Deny" }, style: "danger", action_id: `deny:${approval.id}` },
-          ],
-        }],
-      });
-      return new Promise((resolve) => pending.set(approval.id, resolve));
+      // Register before posting the card: a fast click can arrive as soon as
+      // Slack receives it, before postMessage has returned.
+      let resolveDecision!: (d: "approved" | "denied") => void;
+      const decision = new Promise<"approved" | "denied">((resolve) => { resolveDecision = resolve; });
+      pending.set(approval.id, resolveDecision);
+
+      try {
+        await app.client.chat.postMessage({
+          channel: event.channelId,
+          thread_ts: event.threadId,
+          text: `Approval needed: ${approval.summary}`,
+          blocks: [{
+            type: "actions",
+            block_id: `gate-${approval.id}`,
+            elements: [
+              { type: "button", text: { type: "plain_text", text: "Approve" }, style: "primary", action_id: `approve:${approval.id}` },
+              { type: "button", text: { type: "plain_text", text: "Deny" }, style: "danger", action_id: `deny:${approval.id}` },
+            ],
+          }],
+        });
+      } catch (error) {
+        if (pending.get(approval.id) === resolveDecision) pending.delete(approval.id);
+        throw error;
+      }
+      return decision;
     },
     async upload(event, path, caption) {
       await app.client.files.uploadV2({
@@ -77,26 +91,37 @@ async function main() {
 
   const kit = await buildRuntime(process.env.KIT_CONFIG ?? "kit.config.yaml", hooks);
 
+  const handleApproval = async (
+    action: any,
+    body: any,
+    respond: any,
+    decision: "approved" | "denied",
+  ) => {
+    const id = action.action_id.slice(action.action_id.indexOf(":") + 1);
+    const who = body.user?.id ?? "unknown";
+    if (!kit.permissions.canApprove(who)) return;
+
+    // Resolve against durable state rather than treating the process-local
+    // waiter map as the registry. The conditional store update makes stale,
+    // duplicate, and unknown button clicks harmless.
+    const won = await kit.store.resolveApproval(id, decision, who);
+    if (!won) return;
+
+    const waiter = pending.get(id);
+    pending.delete(id);
+    waiter?.(decision);
+    if (!waiter) kit.audit.record("approval_resolved", who, `${id}: ${decision}`);
+    await replaceButtons(respond, `${decision === "approved" ? "Approved" : "Denied"} by <@${who}>`);
+  };
+
   app.action(/^approve:.+/, async ({ action, ack, body, respond }) => {
     await ack();
-    const id = (action as any).action_id.split(":")[1];
-    const who = (body as any).user?.id ?? "unknown";
-    if (!kit.permissions.canApprove(who)) return;
-    if (!pending.has(id)) return;
-    pending.get(id)?.("approved");
-    pending.delete(id);
-    await replaceButtons(respond, `Approved by <@${who}>`);
+    await handleApproval(action as any, body as any, respond, "approved");
   });
 
   app.action(/^deny:.+/, async ({ action, ack, body, respond }) => {
     await ack();
-    const id = (action as any).action_id.split(":")[1];
-    const who = (body as any).user?.id ?? "unknown";
-    if (!kit.permissions.canApprove(who)) return;
-    if (!pending.has(id)) return;
-    pending.get(id)?.("denied");
-    pending.delete(id);
-    await replaceButtons(respond, `Denied by <@${who}>`);
+    await handleApproval(action as any, body as any, respond, "denied");
   });
 
   app.event("app_mention", async ({ event }) => {
