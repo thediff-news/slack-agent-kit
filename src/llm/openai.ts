@@ -24,10 +24,19 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface ChatOpts {
+  /** Reasoning-model effort dial; ignored by models that do not support it. */
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  /** Per-request timeout (default 180s) so a hung call fails fast instead of stalling a run. */
+  timeoutMs?: number;
+}
+
 /** Generative hook for skills: summarize/investigate with an LLM. */
 export interface Llm {
   model: string;
-  chat(messages: ChatMessage[]): Promise<string>;
+  chat(messages: ChatMessage[], opts?: ChatOpts): Promise<string>;
+  /** Token usage of the most recent call, when the provider reports it. */
+  lastUsage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 export interface OpenAiProvider {
@@ -74,8 +83,23 @@ export function openAiFromEnv(env: NodeJS.ProcessEnv = process.env): OpenAiProvi
 
   const llm: Llm = {
     model: chatModel,
-    async chat(messages) {
-      const res = await client.chat.completions.create({ model: chatModel, messages });
+    lastUsage: undefined,
+    async chat(messages, opts) {
+      const base: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = { model: chatModel, messages };
+      const reqOpts = { timeout: opts?.timeoutMs ?? 180_000 };
+      let res;
+      try {
+        res = await client.chat.completions.create(
+          (opts?.reasoningEffort ? { ...base, reasoning_effort: opts.reasoningEffort } : base) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+          reqOpts,
+        );
+      } catch (e) {
+        // some models reject reasoning_effort - retry once without it
+        if (opts?.reasoningEffort && /reasoning_effort|unsupported/i.test(String((e as any)?.message ?? e))) {
+          res = await client.chat.completions.create(base, reqOpts);
+        } else throw e;
+      }
+      llm.lastUsage = res.usage ? { prompt_tokens: res.usage.prompt_tokens, completion_tokens: res.usage.completion_tokens } : undefined;
       return res.choices[0]?.message?.content?.trim() ?? "";
     },
   };
