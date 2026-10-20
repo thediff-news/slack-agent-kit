@@ -33,6 +33,12 @@ Slack mention / watched channel / webhook / CLI
        stop          idempotent execute -> audit
 ```
 
+### Per-stage models (factory)
+
+Each factory stage can run on its own model via env (default: `OPENAI_CHAT_MODEL`):
+`FACTORY_MODEL_TRIAGE`, `FACTORY_MODEL_PLAN`, `FACTORY_MODEL_REPRO`, `FACTORY_MODEL_CODE`, `FACTORY_MODEL_REVIEW`.
+Browse planning uses `BROWSE_MODEL_NAME`. Per-call latency and token usage land in the audit log as `factory_llm_call` events tagged with the stage and model.
+
 ## Factory skill
 
 `factory <request>` in Slack runs the end-to-end pipeline: triage (bug/feature/question, severity, dedupe vs open issues), analyze the target repo, post a plan in-thread, wait for approval, implement in an isolated clone on a `factory/*` branch, run the repo's own typecheck/test scripts and iterate (maxEditRounds), scan the diff for secrets, and open a PR. It never merges and never pushes to main. Target repos come from the admin allowlist (`skills.factory.repos` in the config). Reports, page text and issue text are treated as untrusted input.

@@ -84,6 +84,8 @@ export interface FactoryOptions {
   maxTestCmdMs?: number;     // default 240s
   clone?: (repo: string, dir: string) => Promise<void>;   // test seam
   openPr?: (dir: string, branch: string, title: string, body: string) => Promise<string>; // test seam
+  /** Per-stage model overrides (env FACTORY_MODEL_TRIAGE/PLAN/REPRO/CODE/REVIEW wire these). Missing stages use llm. */
+  llms?: Partial<Record<"triage" | "plan" | "repro" | "code" | "review", Llm>>;
 }
 
 async function git(dir: string, args: string[]): Promise<string> {
@@ -258,18 +260,27 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   const { llm: rawLlm, hooks } = opts;
   // meter every model call: stage tag + wall time + token usage land in the audit log
   let stageTag = "start";
-  const llm: Llm = {
-    model: rawLlm.model,
-    get lastUsage() { return rawLlm.lastUsage; },
+  const meter = (base: Llm): Llm => ({
+    model: base.model,
+    get lastUsage() { return base.lastUsage; },
     async chat(msgs, o) {
       const t0 = Date.now();
       try {
-        return await rawLlm.chat(msgs, o);
+        return await base.chat(msgs, o);
       } finally {
-        hooks.audit("factory_llm_call", `${stageTag}: ${Date.now() - t0}ms usage=${JSON.stringify(rawLlm.lastUsage ?? {})}`);
+        hooks.audit("factory_llm_call", `${stageTag} [${base.model}]: ${Date.now() - t0}ms usage=${JSON.stringify(base.lastUsage ?? {})}`);
       }
     },
+  });
+  const stageLlm = (s: "triage" | "plan" | "repro" | "code" | "review"): Llm => metered[s];
+  const metered: Record<"triage" | "plan" | "repro" | "code" | "review", Llm> = {
+    triage: meter(opts.llms?.triage ?? rawLlm),
+    plan: meter(opts.llms?.plan ?? rawLlm),
+    repro: meter(opts.llms?.repro ?? rawLlm),
+    code: meter(opts.llms?.code ?? rawLlm),
+    review: meter(opts.llms?.review ?? rawLlm),
   };
+  const llm: Llm = stageLlm("triage"); // default handle; stages below use stageLlm() explicitly
   const workRoot = opts.workRoot ?? mkdtempSync(join(tmpdir(), "factory-"));
   const dir = join(workRoot, "repo");
   const maxRounds = opts.maxEditRounds ?? 6;
@@ -284,7 +295,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
     existing = (JSON.parse(stdout) as any[]).map((i) => `#${i.number} ${i.title}`).join("\n");
   } catch { /* dedupe is best-effort */ }
   stageTag = "triage";
-  const tri = await triage(opts.request, llm, existing || "(unavailable)");
+  const tri = await triage(opts.request, stageLlm("triage"), existing || "(unavailable)");
   hooks.audit("factory_triage", JSON.stringify(tri));
   await hooks.note(`*Triage:* ${tri.kind} (${tri.severity}) - ${tri.title}${tri.duplicates.length ? `\npossible duplicates: ${tri.duplicates.join(", ")}` : ""}\n${tri.summary}`);
   if (tri.kind === "question") {
@@ -304,7 +315,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   }
   const repoCtx = readRepoContext(dir);
   stageTag = "plan";
-  const plan = await planFix(opts.request, tri, repoCtx, llm);
+  const plan = await planFix(opts.request, tri, repoCtx, stageLlm("plan"));
   // full-context strategy for kit-scale repos: the coding/review stages see ALL of src/ + tests/,
   // with plan files (and later, error-implicated files) prioritized so they survive the cap
   const hotFiles = new Set<string>(plan.files);
@@ -328,7 +339,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   let redOut = "";
   try {
     stageTag = "repro";
-    const repro = await reproRound(opts.request, plan, workCtx, llm);
+    const repro = await reproRound(opts.request, plan, workCtx, stageLlm("repro"));
     for (const f of repro.files) {
       const p = join(dir, f.path);
       if (!p.startsWith(dir)) return { ok: false, stage: "repro", triage: tri, plan, summary: `refused write outside repo: ${f.path}` };
@@ -356,7 +367,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
     let batch: EditBatch;
     try {
       stageTag = `code round ${round}`;
-      batch = await codingRound(opts.request, plan, workCtx, failure, llm);
+      batch = await codingRound(opts.request, plan, workCtx, failure, stageLlm("code"));
     } catch (e) {
       failure = `model reply unparseable: ${(e as Error).message}`;
       continue;
@@ -386,7 +397,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
       const diffSoFar = await git(dir, ["diff", "HEAD"]);
       const [t, review] = await Promise.all([
         run("npm", ["test"], { cwd: dir, timeout: opts.maxTestCmdMs ?? 240_000, env: childEnv() }),
-        selfReview(opts.request, plan, diffSoFar, workCtx, llm),
+        selfReview(opts.request, plan, diffSoFar, workCtx, stageLlm("review")),
       ]);
       testOut = ((tscOut ? `typecheck ok\n` : "") + (t.stdout as string)).slice(-3_000);
       hooks.audit("factory_self_review", review.ok ? "clean" : `issues: ${review.issues.join("; ").slice(0, 300)}`);

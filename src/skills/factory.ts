@@ -6,6 +6,22 @@
 import type { Skill, SkillContext, SkillResult } from "../core/skills.js";
 import type { AgentEvent } from "../core/events.js";
 import { runFactory, type FactoryHooks } from "../factory/pipeline.js";
+import { openAiFromEnv, type Llm } from "../llm/openai.js";
+
+type Stage = "triage" | "plan" | "repro" | "code" | "review";
+const STAGES: Stage[] = ["triage", "plan", "repro", "code", "review"];
+
+/** Per-stage model overrides via FACTORY_MODEL_<STAGE>; missing/identical entries reuse the default llm. */
+export function stageLlms(fallback: Llm): Partial<Record<Stage, Llm>> | undefined {
+  const out: Partial<Record<Stage, Llm>> = {};
+  for (const st of STAGES) {
+    const model = process.env[`FACTORY_MODEL_${st.toUpperCase()}`]?.trim();
+    if (!model || model === fallback.model) continue;
+    const llm = openAiFromEnv({ ...process.env, OPENAI_CHAT_MODEL: model })?.llm;
+    if (llm) out[st] = llm;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 export interface FactorySkillOptions {
   repos?: string[]; // admin allowlist: "owner/name"
@@ -50,6 +66,7 @@ export class FactorySkill implements Skill {
     const result = await runFactory({
       repo, request: body, llm: ctx.llm, hooks,
       maxEditRounds: this.opts.maxEditRounds ?? 6,
+      llms: stageLlms(ctx.llm),
     });
 
     const lines = [

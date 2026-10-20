@@ -260,3 +260,31 @@ test("factory: test feedback loop - first edit fails tests, second fixes", async
   assert.equal(result.ok, true, `${result.summary} :: ${(result.testOutput ?? "").slice(-300)}`);
   assert.equal(edits, 2);
 });
+
+test("factory: per-stage llm overrides route code and review to their own models", async () => {
+  const fixture = fixtureRepo();
+  const workRoot = mkdtempSync(join(tmpdir(), "factory-work-"));
+  const seen: Record<string, string[]> = {};
+  const rec = (name: string): Llm => {
+    const inner = scriptedLlm({});
+    return {
+      model: name,
+      async chat(m) {
+        (seen[name] ??= []).push(String(m[m.length - 1].content).slice(0, 60));
+        return inner.chat(m);
+      },
+    };
+  };
+  const h = hooksLog();
+  const result = await runFactory({
+    repo: "acme/widget", request: "add(2,2) returns 0",
+    llm: rec("default"), llms: { code: rec("coder"), review: rec("reviewer") },
+    hooks: h.hooks, workRoot,
+    clone: cloneSeam(fixture),
+    openPr: async () => "https://github.com/acme/widget/pull/8",
+  });
+  assert.equal(result.ok, true, result.summary);
+  assert.ok(seen.coder?.some((p) => /PLAN:/.test(p)), "coding round used the code model");
+  assert.ok(seen.reviewer?.some((p) => /^SELF REVIEW/.test(p)), "self-review used the review model");
+  assert.ok(!seen.default?.some((p) => /^SELF REVIEW|PREVIOUS ATTEMPT/.test(p)), "default model got neither coding nor review");
+});
