@@ -31,12 +31,20 @@ export function resolveTarget(page: Page, t: Target): Locator {
     return page.getByRole(t.role as any, { name: t.name ?? t.text }).first();
   }
   if (t.text) {
-    // visible text first, then labels/placeholders (forms), then title attributes
-    return page
+    // visible text/labels/placeholders first (hidden templates and duplicate
+    // nav copies are a real failure mode - live: MDN "Search"), then any match
+    const visible = page
       .getByText(t.text, { exact: false })
       .or(page.getByLabel(t.text))
       .or(page.getByPlaceholder(t.text))
-      .first();
+      .filter({ visible: true });
+    return visible.first().or(
+      page
+        .getByText(t.text, { exact: false })
+        .or(page.getByLabel(t.text))
+        .or(page.getByPlaceholder(t.text))
+        .first(),
+    );
   }
   throw new Error("empty target");
 }
