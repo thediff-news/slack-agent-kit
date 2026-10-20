@@ -97,8 +97,10 @@ export class HeuristicPlanner implements ModelProvider {
 export class HttpPlanner implements ModelProvider {
   name = "http";
   usesVision: boolean;
-  constructor(private url: string, private key: string, private model: string, private maxSteps: number, vision = false) {
+  private timeoutMs: number;
+  constructor(private url: string, private key: string, private model: string, private maxSteps: number, vision = false, timeoutMs = modelTimeoutFromEnv()) {
     this.usesVision = vision;
+    this.timeoutMs = timeoutMs;
   }
   static fromEnv(maxSteps: number): HttpPlanner | undefined {
     const url = process.env.BROWSE_MODEL_URL, key = process.env.BROWSE_MODEL_KEY, model = process.env.BROWSE_MODEL_NAME;
@@ -129,29 +131,46 @@ export class HttpPlanner implements ModelProvider {
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${obs.screenshotBase64}` } },
         ]
       : user;
-    const res = await fetch(this.url, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.key}` },
-      body: JSON.stringify({
-        model: this.model,
-        messages: [
-          { role: "system", content: sys },
-          { role: "user", content: userContent },
-        ],
-        // no temperature: reasoning models (e.g. gpt-6-luna) reject it with 400
-      }),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      return { kind: "fail", reason: `model endpoint ${res.status}: ${errText.slice(0, 200)}` };
-    }
-    const data = (await res.json()) as any;
-    const raw = String(data?.choices?.[0]?.message?.content ?? "").trim();
-    const json = raw.replace(/^```(json)?|```$/g, "").trim();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      return JSON.parse(json) as Step;
-    } catch {
-      return { kind: "fail", reason: `unparseable model reply: ${raw.slice(0, 120)}` };
+      const res = await fetch(this.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.key}` },
+        body: JSON.stringify({
+          model: this.model,
+          messages: [
+            { role: "system", content: sys },
+            { role: "user", content: userContent },
+          ],
+          // no temperature: reasoning models (e.g. gpt-6-luna) reject it with 400
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        return { kind: "fail", reason: `model endpoint ${res.status}: ${errText.slice(0, 200)}` };
+      }
+      const data = (await res.json()) as any;
+      const raw = String(data?.choices?.[0]?.message?.content ?? "").trim();
+      const json = raw.replace(/^```(json)?|```$/g, "").trim();
+      try {
+        return JSON.parse(json) as Step;
+      } catch {
+        return { kind: "fail", reason: `unparseable model reply: ${raw.slice(0, 120)}` };
+      }
+    } catch (e) {
+      if (controller.signal.aborted) {
+        return { kind: "fail", reason: `model endpoint timeout after ${this.timeoutMs}ms` };
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
     }
   }
+}
+
+function modelTimeoutFromEnv(): number {
+  const configured = Number(process.env.BROWSE_MODEL_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 60_000;
 }
