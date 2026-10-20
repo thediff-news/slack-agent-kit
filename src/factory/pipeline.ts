@@ -289,8 +289,11 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   }
   const repoCtx = readRepoContext(dir);
   const plan = await planFix(opts.request, tri, repoCtx, llm);
-  // plan-aware context: guarantee the files the plan touches (and their imports) are actually included
-  const workCtx = readRepoContext(dir, 100_000, plan.files);
+  // full-context strategy for kit-scale repos: the coding/review stages see ALL of src/ + tests/,
+  // with plan files (and later, error-implicated files) prioritized so they survive the cap
+  const hotFiles = new Set<string>(plan.files);
+  const buildCtx = () => readRepoContext(dir, 170_000, [...hotFiles]);
+  let workCtx = buildCtx();
   hooks.audit("factory_plan", JSON.stringify(plan));
 
   // PLAN GATE
@@ -368,6 +371,8 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
       hooks.audit("factory_self_review", review.ok ? "clean" : `issues: ${review.issues.join("; ").slice(0, 300)}`);
       if (!review.ok) {
         failure = `self-review found issues (round ${round}):\n${review.issues.map((i) => `- ${i}`).join("\n")}`;
+        for (const m of failure.matchAll(/(?:src|tests)\/[\w./-]+\.(?:ts|js)/g)) hotFiles.add(m[0]);
+        workCtx = buildCtx();
         continue;
       }
       failure = undefined;
@@ -375,6 +380,9 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
     } catch (e: any) {
       failure = `npm test / tsc / repro failed (round ${round}):\n${String(e.stdout ?? "").slice(-4_000)}\n${String(e.stderr ?? e.message).slice(0, 2_000)}`;
       hooks.audit("factory_test_failed", `round ${round}`);
+      // pull every file the failure implicates into the next round's context
+      for (const m of failure.matchAll(/(?:src|tests)\/[\w./-]+\.(?:ts|js)/g)) hotFiles.add(m[0]);
+      workCtx = buildCtx();
     }
   }
   if (failure) {
