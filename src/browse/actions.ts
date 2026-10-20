@@ -73,12 +73,46 @@ export async function navigate(page: Page, url: string): Promise<ActionResult> {
   }
 }
 
+/** Fallback locators when the primary text/role resolution fails or times out:
+ * interactive elements carrying the label, then a case-insensitive has-text css. */
+function fallbackLocators(page: Page, t: Target): Locator[] {
+  const label = t.text ?? t.name;
+  if (!label) return [];
+  const esc = label.replace(/"/g, '\\"');
+  return [
+    page.getByRole("button", { name: new RegExp(escapeRegExp(label), "i") }).first(),
+    page.getByRole("link", { name: new RegExp(escapeRegExp(label), "i") }).first(),
+    page.getByRole("menuitem", { name: new RegExp(escapeRegExp(label), "i") }).first(),
+    page.locator(`[role="button"]:has-text("${esc}")`).first(),
+    page.locator(`button:has-text("${esc}"), a:has-text("${esc}")`).first(),
+    page.locator(`input[type="submit" i][value*="${esc}" i], input[type="button" i][value*="${esc}" i]`).first(),
+  ];
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function clickLocator(loc: Locator): Promise<void> {
+  await loc.scrollIntoViewIfNeeded({ timeout: 5_000 });
+  await loc.click({ timeout: 5_000 });
+}
+
 export async function click(page: Page, t: Target): Promise<ActionResult> {
   try {
     await withRetries(async () => {
-      const loc = resolveTarget(page, t);
-      await loc.scrollIntoViewIfNeeded({ timeout: 5_000 });
-      await loc.click({ timeout: 5_000 });
+      try {
+        await clickLocator(resolveTarget(page, t));
+      } catch (primaryErr) {
+        // fallback chain: other interactive roles / css has-text carrying the label
+        for (const fb of fallbackLocators(page, t)) {
+          try {
+            await clickLocator(fb);
+            return;
+          } catch { /* try next fallback */ }
+        }
+        throw primaryErr;
+      }
     });
     await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
     return { ok: true, detail: `clicked ${describe(t)}` };
@@ -184,19 +218,55 @@ export async function fillForm(page: Page, fields: { target: Target; value: stri
   return { ok: true, detail: `filled ${filled.join(", ")}` };
 }
 
-/** Dismiss common cookie/consent banners. Safe: only clicks dismiss-style buttons. */
+/** Dismiss common cookie/consent banners and in-page modal overlays. Safe: only
+ * clicks dismiss-style controls (buttons AND links), never submit-style ones. */
 export async function dismissPopups(page: Page): Promise<ActionResult> {
-  const patterns = [/^accept( all)?$/i, /^agree$/i, /^got it$/i, /^ok$/i, /^dismiss$/i, /^no thanks$/i, /^reject all$/i, /^close$/i];
+  const patterns = [/^accept( all)?$/i, /^agree$/i, /^got it$/i, /^ok$/i, /^dismiss$/i, /^no thanks$/i, /^reject all$/i, /^close$/i, /^×$/];
   for (const p of patterns) {
-    try {
-      const btn = page.getByRole("button", { name: p }).first();
-      if (await btn.isVisible({ timeout: 800 })) {
-        await btn.click({ timeout: 2_000 });
-        return { ok: true, detail: `dismissed popup (${p})` };
-      }
-    } catch { /* keep trying patterns */ }
+    for (const role of ["button", "link", "menuitem"] as const) {
+      try {
+        const btn = page.getByRole(role, { name: p }).first();
+        if (await btn.isVisible({ timeout: 800 })) {
+          await btn.click({ timeout: 2_000 });
+          return { ok: true, detail: `dismissed popup (${role} ${p})` };
+        }
+      } catch { /* keep trying patterns */ }
+    }
+  }
+  // in-page modal overlays (role=dialog, .modal, [class*=overlay]) with a close control
+  const overlayClose = page.locator([
+    '[role="dialog"] :is(button, a, [role="button"]):has-text(/close|dismiss|×/i)',
+    '.modal:visible :is(button, a):has-text(/close|dismiss|×/i)',
+    '[class*="modal" i]:visible [class*="close" i]',
+    '[class*="overlay" i]:visible :is(button, a):has-text(/close|×/i)',
+  ].join(", ")).first();
+  try {
+    if (await overlayClose.isVisible({ timeout: 800 })) {
+      await overlayClose.click({ timeout: 2_000 });
+      return { ok: true, detail: "dismissed modal overlay (close control)" };
+    }
+  } catch { /* fall through to Escape */ }
+  // Escape closes most dialogs/overlays without any pointer risk
+  const hadOverlay = await page.locator('[role="dialog"]:visible, .modal:visible, [class*="overlay" i]:visible').first().isVisible({ timeout: 500 }).catch(() => false);
+  if (hadOverlay) {
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(300);
+    const still = await page.locator('[role="dialog"]:visible, .modal:visible, [class*="overlay" i]:visible').first().isVisible({ timeout: 500 }).catch(() => false);
+    if (!still) return { ok: true, detail: "dismissed overlay (Escape)" };
   }
   return { ok: true, detail: "no popup found" };
+}
+
+/** Last-resort pointer click at page coordinates (vision-grounded fallback). */
+export async function clickAt(page: Page, x: number, y: number): Promise<ActionResult> {
+  try {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) throw new Error(`bad coordinates ${x},${y}`);
+    await page.mouse.click(x, y);
+    await page.waitForLoadState("domcontentloaded", { timeout: 3_000 }).catch(() => {});
+    return { ok: true, detail: `clicked at (${x}, ${y})` };
+  } catch (e) {
+    return { ok: false, detail: `clickAt failed: ${(e as Error).message.split("\n")[0]}` };
+  }
 }
 
 export function describe(t: Target): string {

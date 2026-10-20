@@ -93,10 +93,20 @@ export async function runLoop(
       return { ok: false, summary: `planner error: ${(e as Error).message}`, steps, screenshots };
     }
 
-    // LOOP DETECTION: same action+target 3 times in a row -> abort honestly
+    // LOOP DETECTION: same action+target 3 times in a row -> abort honestly.
+    // Read-only polls (extract/screenshot) get one automatic wait-and-continue
+    // instead: repeating them is how you wait for dynamic content to change.
     const fp = JSON.stringify(step);
     recentFingerprints.push(fp);
-    if (recentFingerprints.length >= 3 && recentFingerprints.slice(-3).every((f) => f === fp)) {
+    const readOnly = step.kind === "extract" || step.kind === "screenshot";
+    const repeats = recentFingerprints.length >= 3 && recentFingerprints.slice(-3).every((f) => f === fp);
+    if (repeats && readOnly) {
+      // poll-with-patience: wait for the page to change, then run the read and
+      // give the planner a fresh repeat window; the step cap still bounds it
+      await page.waitForTimeout(1_500);
+      opts.audit?.("browse_autowait", `read-only repeat of ${step.kind} - waited 1.5s`);
+      recentFingerprints.length = 0;
+    } else if (repeats) {
       return { ok: false, summary: `stuck repeating ${fp.slice(0, 120)} - aborted`, steps, screenshots, blockedReason: "loop" };
     }
 
@@ -159,6 +169,7 @@ export async function runLoop(
       case "download": r = await act.downloadFile(page, step.target, shotDir); break;
       case "fillForm": r = await act.fillForm(page, step.fields); break;
       case "dismissPopups": r = await act.dismissPopups(page); break;
+      case "clickAt": r = await act.clickAt(page, step.x, step.y); break;
       default:
         r = { ok: false, detail: `unknown step kind ${(step as any).kind}` };
     }

@@ -47,6 +47,17 @@ const PAGES: Record<string, string> = {
   "/stale": `<html><title>Stale</title><body><div id="c"><button id="b">Click me</button></div>
     <script>setInterval(()=>{document.getElementById('c').innerHTML='<button id="b">Click me</button>'},200);</script>
     </body></html>`,
+  "/modal": `<html><title>Entry Ad</title><body><h1>Entry Ad</h1>
+    <div style="display:none"><p>Close</p></div>
+    <div class="modal" id="m" style="position:fixed;top:20%;left:30%;background:white;border:1px solid #000;padding:20px">
+      <div class="modal-title"><h3>This is a modal window</h3></div>
+      <div class="modal-footer"><p><a href="#" id="close">Close</a></p></div>
+    </div>
+    <script>document.getElementById('close').onclick=(e)=>{e.preventDefault();document.getElementById('m').style.display='none'}</script>
+    </body></html>`,
+  "/dynamic": `<html><title>Dynamic</title><body><div id="content">Loading...</div>
+    <script>setTimeout(()=>{document.getElementById('content').textContent='Hello World!'},1200);</script>
+    </body></html>`,
 };
 
 before(async () => {
@@ -154,6 +165,43 @@ test("actions: cookie banner dismissal, infinite scroll loads more, file downloa
   assert.ok(res.ok, res.detail);
   assert.ok(res.downloadPath?.endsWith("report.bin"));
   await p.close();
+});
+
+test("actions: modal overlay closed via link-role Close (entry_ad style), hidden template copy ignored", async () => {
+  const p = await session.newTab();
+  await act.navigate(p, `${base}/modal`);
+  const d = await act.dismissPopups(p);
+  assert.match(d.detail, /dismissed/);
+  assert.equal(await p.locator("#m").isVisible(), false);
+  await p.close();
+});
+
+test("actions: click falls back across roles and clickAt hits page coordinates", async () => {
+  const p = await session.newTab();
+  await act.navigate(p, `${base}/modal`);
+  const c = await act.click(p, { text: "Close" }); // hidden template copy exists; visible link must win
+  assert.ok(c.ok, c.detail);
+  assert.equal(await p.locator("#m").isVisible(), false);
+  await act.navigate(p, `${base}/form`);
+  const box = await p.locator("#submit").boundingBox();
+  assert.ok(box);
+  const ca = await act.clickAt(p, Math.round(box.x + box.width / 2), Math.round(box.y + box.height / 2));
+  assert.ok(ca.ok, ca.detail);
+  await p.waitForSelector("h1");
+  assert.match(await p.innerText("h1"), /Thanks!/);
+  await p.close();
+});
+
+test("loop: repeated read-only extract auto-waits for dynamic content instead of aborting", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "browse-loop-"));
+  const planner = new ScriptedPlanner([
+    { kind: "navigate", url: `${base}/dynamic` },
+    { kind: "extract" }, { kind: "extract" }, { kind: "extract" }, // would abort as a loop before the fix
+    { kind: "done", summary: "saw it" },
+  ]);
+  const res = await runLoop(session, planner, "wait for the text", { allowlist: ["127.0.0.1"], gate: allow, screenshotDir: dir });
+  assert.ok(res.ok, res.summary);
+  assert.ok(res.steps.some((s) => /Hello World!/.test(s.result)), JSON.stringify(res.steps.map((s) => s.result)));
 });
 
 test("loop: happy path with scripted planner posts steps and screenshots", async () => {
