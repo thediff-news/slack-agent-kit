@@ -131,9 +131,11 @@ export function readRepoContext(dir: string, maxChars = 60_000, priorityFiles: s
       }
     } catch { /* unreadable */ }
   }
+  // existing tests are the model's construction playbook - include them early
+  for (const f of files.filter((f) => /^tests?\//.test(f)).slice(0, 15)) include(f);
   out += `FILE TREE:\n${tree}\n\n`;
   const interesting = files.filter((f) =>
-    /(^src\/|^tests\/|README|CONTRIBUTING|\.ts$|\.js$)/.test(f) && !/\.test\.ts$/.test(f)).slice(0, 40);
+    /(^src\/|README|CONTRIBUTING|\.ts$|\.js$)/.test(f)).slice(0, 40);
   for (const f of interesting) include(f);
   return out.slice(0, maxChars);
 }
@@ -288,7 +290,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   const repoCtx = readRepoContext(dir);
   const plan = await planFix(opts.request, tri, repoCtx, llm);
   // plan-aware context: guarantee the files the plan touches (and their imports) are actually included
-  const workCtx = readRepoContext(dir, 60_000, plan.files);
+  const workCtx = readRepoContext(dir, 100_000, plan.files);
   hooks.audit("factory_plan", JSON.stringify(plan));
 
   // PLAN GATE
