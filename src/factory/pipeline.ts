@@ -6,7 +6,7 @@
  * never main), secrets scanned out of diffs before commit, step/time caps,
  * request text treated as untrusted data.
  */
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +15,27 @@ import type { Llm } from "../llm/openai.js";
 
 const run = promisify(execFile);
 
+/** Like `run` but kills the whole process group on timeout, so a hung test
+ *  suite cannot orphan grandchildren (npm -> tsx -> node --test workers). */
+function runGroup(cmd: string, args: string[], opts: { cwd: string; timeout: number; env: NodeJS.ProcessEnv }): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, detached: true });
+    let stdout = "", stderr = "";
+    child.stdout?.on("data", (d) => (stdout += d));
+    child.stderr?.on("data", (d) => (stderr += d));
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already gone */ }
+      reject(Object.assign(new Error(`${cmd} ${args.join(" ")} timed out after ${opts.timeout}ms`), { stdout, stderr }));
+    }, opts.timeout);
+    child.on("error", (e) => { clearTimeout(timer); reject(Object.assign(e, { stdout, stderr })); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(Object.assign(new Error(`${cmd} exited ${code}`), { stdout, stderr }));
+    });
+  });
+}
+
 /** Run one test file with the repo's own runner (tsx or node). */
 async function runSingleTest(dir: string, testFile: string, timeoutMs: number): Promise<{ ok: boolean; output: string }> {
   const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { scripts?: Record<string, string> };
@@ -22,7 +43,7 @@ async function runSingleTest(dir: string, testFile: string, timeoutMs: number): 
   const cmd = usesTsx ? "npx" : "node";
   const args = usesTsx ? ["tsx", "--test", testFile] : ["--test", testFile];
   try {
-    const r = await run(cmd, args, { cwd: dir, timeout: timeoutMs, env: childEnv() });
+    const r = await runGroup(cmd, args, { cwd: dir, timeout: timeoutMs, env: childEnv() });
     return { ok: true, output: String(r.stdout).slice(-2_000) };
   } catch (e: any) {
     return { ok: false, output: `${String(e.stdout ?? "").slice(-2_500)}\n${String(e.stderr ?? e.message).slice(0, 800)}` };
@@ -396,7 +417,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
       stageTag = `review round ${round}`;
       const diffSoFar = await git(dir, ["diff", "HEAD"]);
       const [t, review] = await Promise.all([
-        run("npm", ["test"], { cwd: dir, timeout: opts.maxTestCmdMs ?? 240_000, env: childEnv() }),
+        runGroup("npm", ["test"], { cwd: dir, timeout: opts.maxTestCmdMs ?? 240_000, env: childEnv() }),
         selfReview(opts.request, plan, diffSoFar, workCtx, stageLlm("review")),
       ]);
       testOut = ((tscOut ? `typecheck ok\n` : "") + (t.stdout as string)).slice(-3_000);

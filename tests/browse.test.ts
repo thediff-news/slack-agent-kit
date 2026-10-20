@@ -77,7 +77,7 @@ before(async () => {
 });
 
 after(async () => {
-  await session.close();
+  if (session) await session.close().catch(() => {});
   server.close();
 });
 
