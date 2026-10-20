@@ -33,6 +33,10 @@ Slack mention / watched channel / webhook / CLI
        stop          idempotent execute -> audit
 ```
 
+## Factory skill
+
+`factory <request>` in Slack runs the end-to-end pipeline: triage (bug/feature/question, severity, dedupe vs open issues), analyze the target repo, post a plan in-thread, wait for approval, implement in an isolated clone on a `factory/*` branch, run the repo's own typecheck/test scripts and iterate (maxEditRounds), scan the diff for secrets, and open a PR. It never merges and never pushes to main. Target repos come from the admin allowlist (`skills.factory.repos` in the config). Reports, page text and issue text are treated as untrusted input.
+
 ## What's in the box
 
 - **Slack adapter** (`src/adapters/slack.ts`) - Bolt in Socket Mode: listens on
