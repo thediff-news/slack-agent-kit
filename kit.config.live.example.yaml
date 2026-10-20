@@ -1,0 +1,60 @@
+store:
+  driver: sqlite
+  path: data/kit-live.sqlite
+auditLogPath: data/audit-live.jsonl
+rag:
+  dbPath: data/rag-live.sqlite
+  dimensions: 1536
+connectors:
+  github:
+    type: github
+    repos: encode/httpx,thediff-news/slack-agent-kit,thediff-news/leaked-credential-triage,thediff-news/thediff-news.github.io
+    acl: public
+  slack-history:
+    type: slack-history
+    channels: C0CACR1TG14
+    acl: public
+  jira:
+    type: jira
+    site: https://mail-team-sje0o278.atlassian.net
+    acl: public
+  confluence:
+    type: confluence
+    site: https://mail-team-sje0o278.atlassian.net
+    acl: public
+  notion:
+    type: notion
+    acl: public
+sync:
+  intervalMinutes: 1
+  notifyChannel: C0CACR1TG14
+permissions:
+  roles:
+    admin: [read, propose, execute, approve]
+    viewer: [read]
+  users:
+    U0CACR1NC30: admin
+  approvers: [U0CACR1NC30]
+  channels:
+    C0CACR1TG14:
+      allow: ["*"]
+  roleAcls:
+    admin: [finance, engineering]
+    viewer: []
+approval:
+  timeoutMinutes: 60
+skills:
+  browse:
+    maxSteps: 15
+    maxDurationMs: 300000
+    screenshotDir: /tmp/browse-shots
+    allowlist:
+      - example.com
+      - githubstatus.com
+      - status.github.com
+      - developer.mozilla.org
+      - httpbin.org
+  alert-router:
+    escalateThreshold: 3
+    routing:
+      checkout: "@payments-oncall"
