@@ -87,6 +87,8 @@ function rowToApproval(r: any): Approval {
   return {
     id: r.id, actionKey: r.action_key, summary: r.summary,
     requestedBy: r.requested_by, requestedAt: r.requested_at,
-    status: r.status, resolvedBy: r.resolved_by ?? undefined, resolvedAt: r.resolved_at ?? undefined,
+    status: r.status,
+    ...(r.resolved_by != null ? { resolvedBy: r.resolved_by } : {}),
+    ...(r.resolved_at != null ? { resolvedAt: r.resolved_at } : {}),
   };
 }
