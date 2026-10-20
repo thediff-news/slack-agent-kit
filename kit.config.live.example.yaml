@@ -50,7 +50,7 @@ skills:
     repos:                    # admin allowlist: only these repos can be targeted
       - thediff-news/slack-agent-kit
     defaultRepo: thediff-news/slack-agent-kit
-    maxEditRounds: 4
+    maxEditRounds: 6
   browse:
     maxSteps: 15
     maxDurationMs: 300000

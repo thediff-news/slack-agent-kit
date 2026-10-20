@@ -102,21 +102,39 @@ async function defaultOpenPr(dir: string, branch: string, title: string, body: s
 }
 
 /** Repo file map + key file contents, capped for the model context. */
-export function readRepoContext(dir: string, maxChars = 60_000): string {
+export function readRepoContext(dir: string, maxChars = 60_000, priorityFiles: string[] = []): string {
   const files = gitSyncSafe(dir, ["ls-files"]).split("\n").filter(Boolean)
     .filter((f) => !/\.(png|jpg|jpeg|gif|ico|lock|map)$|node_modules|package-lock/.test(f));
   const tree = files.join("\n");
-  let out = `FILE TREE:\n${tree}\n\n`;
-  const interesting = files.filter((f) =>
-    /(^src\/|^tests\/|README|CONTRIBUTING|\.ts$|\.js$)/.test(f) && !/\.test\.ts$/.test(f)).slice(0, 40);
-  for (const f of interesting) {
-    if (out.length > maxChars) break;
+  let out = "";
+  const seen = new Set<string>();
+  const include = (f: string) => {
+    if (out.length > maxChars || seen.has(f)) return;
     try {
       const content = readFileSync(join(dir, f), "utf8");
-      if (content.length > 20_000) continue;
+      if (content.length > 25_000) return;
       out += `\n=== ${f} ===\n${content}\n`;
+      seen.add(f);
+    } catch { /* unreadable */ }
+  };
+  // files the plan intends to touch (and anything they import, shallowly) come first
+  for (const f of priorityFiles) {
+    include(f);
+    try {
+      const content = readFileSync(join(dir, f), "utf8");
+      for (const m of content.matchAll(/from ["'](\.{1,2}\/[^"']+)["']/g)) {
+        const resolved = join(f, "..", m[1]).replace(/\\/g, "/").replace(/^\.\//, "");
+        for (const cand of [resolved, resolved.replace(/\.js$/, ".ts"), `${resolved}.ts`, `${resolved}.js`, `${resolved}/index.ts`]) {
+          const norm = cand.replace(/^(\.\/)+/, "");
+          if (files.includes(norm)) include(norm);
+        }
+      }
     } catch { /* unreadable */ }
   }
+  out += `FILE TREE:\n${tree}\n\n`;
+  const interesting = files.filter((f) =>
+    /(^src\/|^tests\/|README|CONTRIBUTING|\.ts$|\.js$)/.test(f) && !/\.test\.ts$/.test(f)).slice(0, 40);
+  for (const f of interesting) include(f);
   return out.slice(0, maxChars);
 }
 
@@ -238,7 +256,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   const { llm, hooks } = opts;
   const workRoot = opts.workRoot ?? mkdtempSync(join(tmpdir(), "factory-"));
   const dir = join(workRoot, "repo");
-  const maxRounds = opts.maxEditRounds ?? 4;
+  const maxRounds = opts.maxEditRounds ?? 6;
   const clone = opts.clone ?? defaultClone;
   const openPr = opts.openPr ?? defaultOpenPr;
 
@@ -269,6 +287,8 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   }
   const repoCtx = readRepoContext(dir);
   const plan = await planFix(opts.request, tri, repoCtx, llm);
+  // plan-aware context: guarantee the files the plan touches (and their imports) are actually included
+  const workCtx = readRepoContext(dir, 60_000, plan.files);
   hooks.audit("factory_plan", JSON.stringify(plan));
 
   // PLAN GATE
@@ -286,7 +306,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
   let reproPath = "";
   let redOut = "";
   try {
-    const repro = await reproRound(opts.request, plan, repoCtx, llm);
+    const repro = await reproRound(opts.request, plan, workCtx, llm);
     for (const f of repro.files) {
       const p = join(dir, f.path);
       if (!p.startsWith(dir)) return { ok: false, stage: "repro", triage: tri, plan, summary: `refused write outside repo: ${f.path}` };
@@ -313,7 +333,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
     hooks.audit("factory_edit_round", `round ${round}`);
     let batch: EditBatch;
     try {
-      batch = await codingRound(opts.request, plan, repoCtx, failure, llm);
+      batch = await codingRound(opts.request, plan, workCtx, failure, llm);
     } catch (e) {
       failure = `model reply unparseable: ${(e as Error).message}`;
       continue;
@@ -342,7 +362,7 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
       testOut = ((tscOut ? `typecheck ok\n` : "") + (t.stdout as string)).slice(-3_000);
       // SELF-REVIEW of the complete diff before committing
       const diffSoFar = await git(dir, ["diff", "HEAD"]);
-      const review = await selfReview(opts.request, plan, diffSoFar, repoCtx, llm);
+      const review = await selfReview(opts.request, plan, diffSoFar, workCtx, llm);
       hooks.audit("factory_self_review", review.ok ? "clean" : `issues: ${review.issues.join("; ").slice(0, 300)}`);
       if (!review.ok) {
         failure = `self-review found issues (round ${round}):\n${review.issues.map((i) => `- ${i}`).join("\n")}`;

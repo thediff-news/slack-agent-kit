@@ -49,7 +49,7 @@ export class FactorySkill implements Skill {
 
     const result = await runFactory({
       repo, request: body, llm: ctx.llm, hooks,
-      maxEditRounds: this.opts.maxEditRounds ?? 4,
+      maxEditRounds: this.opts.maxEditRounds ?? 6,
     });
 
     const lines = [
