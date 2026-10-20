@@ -14,8 +14,6 @@ import type { RuntimeHooks } from "../core/runtime.js";
 import type { ProposedAction } from "../core/skills.js";
 import { buildRuntime } from "../kit.js";
 
-const pending = new Map<string, (d: "approved" | "denied") => void>();
-
 function toEvent(e: { ts: string; user?: string; channel: string; text?: string; thread_ts?: string }, kind: AgentEvent["kind"]): AgentEvent {
   return {
     id: makeEventId("slack", e.ts), // Slack ts is unique per channel message: our idempotency key
@@ -29,7 +27,6 @@ function toEvent(e: { ts: string; user?: string; channel: string; text?: string;
     raw: e,
   };
 }
-
 
 async function replaceButtons(respond: any, text: string) {
   try {
@@ -62,7 +59,10 @@ async function main() {
           ],
         }],
       });
-      return new Promise((resolve) => pending.set(approval.id, resolve));
+      // The runtime persists the approval and owns its resolution. Do not keep
+      // the decision in an adapter-local promise map: that map disappears on
+      // restart, while the Slack message and its approval ID remain durable.
+      return new Promise(() => {});
     },
     async upload(event, path, caption) {
       await app.client.files.uploadV2({
@@ -77,26 +77,34 @@ async function main() {
 
   const kit = await buildRuntime(process.env.KIT_CONFIG ?? "kit.config.yaml", hooks);
 
+  const decide = async (action: any, body: any, respond: any, decision: "approved" | "denied") => {
+    const id = String(action.action_id).split(":")[1];
+    const who = body.user?.id ?? "unknown";
+    if (!kit.permissions.canApprove(who)) return;
+
+    // Resolve by durable approval ID. The runtime validates that the approval
+    // is still pending and resumes any persisted gated work (including sync
+    // first-sync gates) exactly once.
+    const runtime = kit.runtime as typeof kit.runtime & {
+      resolveApproval?: (approvalId: string, actorId: string, decision: "approved" | "denied") => Promise<boolean>;
+    };
+    if (!runtime.resolveApproval) {
+      console.warn(`[approval] runtime cannot resolve durable approval ${id}`);
+      return;
+    }
+    const resolved = await runtime.resolveApproval(id, who, decision);
+    if (!resolved) return;
+    await replaceButtons(respond, `${decision === "approved" ? "Approved" : "Denied"} by <@${who}>`);
+  };
+
   app.action(/^approve:.+/, async ({ action, ack, body, respond }) => {
     await ack();
-    const id = (action as any).action_id.split(":")[1];
-    const who = (body as any).user?.id ?? "unknown";
-    if (!kit.permissions.canApprove(who)) return;
-    if (!pending.has(id)) return;
-    pending.get(id)?.("approved");
-    pending.delete(id);
-    await replaceButtons(respond, `Approved by <@${who}>`);
+    await decide(action, body, respond, "approved");
   });
 
   app.action(/^deny:.+/, async ({ action, ack, body, respond }) => {
     await ack();
-    const id = (action as any).action_id.split(":")[1];
-    const who = (body as any).user?.id ?? "unknown";
-    if (!kit.permissions.canApprove(who)) return;
-    if (!pending.has(id)) return;
-    pending.get(id)?.("denied");
-    pending.delete(id);
-    await replaceButtons(respond, `Denied by <@${who}>`);
+    await decide(action, body, respond, "denied");
   });
 
   app.event("app_mention", async ({ event }) => {
