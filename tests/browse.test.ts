@@ -314,3 +314,22 @@ test("keyless heuristic planner: 'go to <url> and click <label>' queues the clic
   assert.equal(res.ok, false);
   assert.equal(res.blockedReason, "irreversible");
 });
+
+test("HttpPlanner: no temperature in the request (reasoning models reject it); endpoint errors surface the body", async () => {
+  const seen: any[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    seen.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ error: { message: "Unsupported parameter: temperature" } }), { status: 400 });
+  }) as any;
+  try {
+    const p = new HttpPlanner("https://model.example/v1/chat", "k", "m", 10, true);
+    const step = await p.plan("g", { url: "u", title: "t", ariaTree: "", text: "", suspiciousLines: [], stepCount: 0 }, []);
+    assert.equal(step.kind, "fail");
+    assert.match((step as any).reason, /400/);
+    assert.match((step as any).reason, /Unsupported parameter: temperature/);
+    assert.ok(!("temperature" in seen[0]), "temperature not sent");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

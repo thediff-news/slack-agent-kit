@@ -135,10 +135,13 @@ export class HttpPlanner implements ModelProvider {
           { role: "system", content: sys },
           { role: "user", content: userContent },
         ],
-        temperature: 0,
+        // no temperature: reasoning models (e.g. gpt-6-luna) reject it with 400
       }),
     });
-    if (!res.ok) return { kind: "fail", reason: `model endpoint ${res.status}` };
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      return { kind: "fail", reason: `model endpoint ${res.status}: ${errText.slice(0, 200)}` };
+    }
     const data = (await res.json()) as any;
     const raw = String(data?.choices?.[0]?.message?.content ?? "").trim();
     const json = raw.replace(/^```(json)?|```$/g, "").trim();
