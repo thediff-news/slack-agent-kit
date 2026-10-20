@@ -1,3 +1,5 @@
+# Scrubbed copy of the live Slack config used in the agent-kit demo workspace.
+# Secrets come from env (SLACK_BOT_TOKEN, GH_TOKEN, OPENAI_API_KEY, ...), never this file.
 store:
   driver: sqlite
   path: data/kit-live.sqlite
