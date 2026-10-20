@@ -9,7 +9,7 @@ import type { Skill, SkillContext, SkillResult } from "../core/skills.js";
 import type { AgentEvent } from "../core/events.js";
 import { BrowserSession } from "../browse/browser.js";
 import { runLoop } from "../browse/loop.js";
-import { HeuristicPlanner, HttpPlanner } from "../browse/planner.js";
+import { HeuristicPlanner, HttpPlanner, type ModelProvider } from "../browse/planner.js";
 
 export interface BrowseSkillOptions {
   allowlist?: string[];
@@ -18,6 +18,7 @@ export interface BrowseSkillOptions {
   profileDir?: string;
   screenshotDir?: string;
   cdpEndpoint?: string; // hosted browser; defaults to env BROWSE_CDP_URL
+  planner?: ModelProvider; // test seam: overrides the env/heuristic planner selection
 }
 
 const CMD = /^browse\s+(.+)/is;
@@ -53,7 +54,7 @@ export class BrowseSkill implements Skill {
     const allowlist = stored ? (JSON.parse(stored) as string[]) : [...(this.opts.allowlist ?? [])];
     const before = allowlist.join(",");
 
-    const planner = HttpPlanner.fromEnv(this.opts.maxSteps ?? 20) ?? new HeuristicPlanner();
+    const planner = this.opts.planner ?? HttpPlanner.fromEnv(this.opts.maxSteps ?? 20) ?? new HeuristicPlanner();
     const shotDir = this.opts.screenshotDir ?? "/tmp/browse-shots";
     let session: BrowserSession | undefined;
     try {

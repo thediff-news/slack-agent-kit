@@ -256,7 +256,7 @@ test("browse skill: matches 'browse <goal>', runs end-to-end, posts screenshot, 
   const store = new SqliteStore(join(dir, "s.db"));
   const audit = new AuditLog(join(dir, "a.jsonl"));
   const rag = new Rag(join(dir, "r.db"), new HashingEmbedder(256));
-  const skill = new BrowseSkill({ allowlist: ["example.com"], screenshotDir: dir });
+  const skill = new BrowseSkill({ allowlist: ["example.com"], screenshotDir: dir, planner: new HeuristicPlanner() });
   assert.ok(skill.matches({ text: `browse go to ${base}/status and read it` } as any));
   assert.ok(skill.matches({ text: `<@U0CAELXUH2N> browse go to ${base}/status and read it` } as any)); // Slack mention prefix
   assert.ok(skill.matches({ text: `browse go to <${base}/status> and read it` } as any)); // Slack link markup
