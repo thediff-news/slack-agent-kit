@@ -199,6 +199,15 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
 
   // ANALYZE
   await clone(opts.repo, dir);
+  // install deps so typecheck/test scripts can run (npm ci when a lockfile exists)
+  if (existsSync(join(dir, "package.json"))) {
+    const hasLock = existsSync(join(dir, "package-lock.json"));
+    try {
+      await run("npm", [hasLock ? "ci" : "install", "--no-audit", "--no-fund"], { cwd: dir, timeout: 300_000, env: childEnv() });
+    } catch (e) {
+      hooks.audit("factory_install_failed", String((e as any)?.message ?? e).slice(0, 300));
+    }
+  }
   const repoCtx = readRepoContext(dir);
   const plan = await planFix(opts.request, tri, repoCtx, llm);
   hooks.audit("factory_plan", JSON.stringify(plan));
