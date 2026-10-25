@@ -24,6 +24,13 @@ surface is socket mode: outbound websocket only, no inbound ports or public
 URL needed - any always-on machine (a laptop under pm2/systemd, a home box, a
 VM) can host it.
 
+Note: the verified demo run lived on a transient agent sandbox (now gone on
+rebuild). To run it for real: clone this repo on your machine, set the env
+vars above (Slack tokens from the app's Slack app config, your Anthropic key,
+optional SaaS tokens), `npm install`, then `npx tsx sdk-app/run-slack.mts`
+under pm2/systemd. No paid hosting is required; socket mode works from any
+machine with outbound HTTPS.
+
 ## Configuration (all env, no secrets in code)
 
 | env | meaning | default |

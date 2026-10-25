@@ -38,13 +38,20 @@ export class AgentCore {
   private turns = new Map<string, Promise<void>>();
   private aborts = new Map<string, AbortController>();
 
-  /** Abort the in-flight turn for a thread, if any. Returns true when a turn
-   * was actually cancelled. */
-  cancel(threadKey: string): boolean {
-    const ac = this.aborts.get(threadKey);
-    if (!ac || ac.signal.aborted) return false;
-    ac.abort();
-    return true;
+  /** Abort in-flight turns: the exact thread always; when `threadKey` is a
+   * fresh top-level message (no turn in that exact thread), fall back to any
+   * active turn in the same channel - a user types "stop" in the channel,
+   * not inside the running thread. Returns the number of turns cancelled. */
+  cancel(threadKey: string): number {
+    const channel = threadKey.split(":")[0];
+    const hit = new Set<AbortController>();
+    const direct = this.aborts.get(threadKey);
+    if (direct && !direct.signal.aborted) hit.add(direct);
+    for (const [k, ac] of this.aborts) {
+      if (k.split(":")[0] === channel && !ac.signal.aborted) hit.add(ac);
+    }
+    for (const ac of hit) ac.abort();
+    return hit.size;
   }
 
   constructor(

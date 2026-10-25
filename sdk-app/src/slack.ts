@@ -12,6 +12,14 @@ import { buildRuntime } from "./runtime.js";
 
 /** Slack renders badly past ~4k chars; split long answers on paragraph, then
  * line, then hard boundaries. Exported for tests. */
+/** Slack mrkdwn is not CommonMark: **bold** renders literally. Convert the
+ * model's markdown bold to Slack's *bold*, leaving code spans untouched. */
+export function toMrkdwn(text: string): string {
+  return text.split(/(`[^`]*`)/g).map((part, i) =>
+    i % 2 === 1 ? part : part.replace(/\*\*([^*]+)\*\*/g, "*$1*")
+  ).join("");
+}
+
 export function chunkText(text: string, max = 3500): string[] {
   if (text.length <= max) return [text];
   const chunks: string[] = [];
@@ -46,11 +54,12 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     const threadKey = `${event.channel}:${thread}`;
     const text: string = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
     const sayThread = async (message: string) => {
-      for (const chunk of chunkText(message)) await say({ text: chunk, thread_ts: thread });
+      for (const chunk of chunkText(toMrkdwn(message))) await say({ text: chunk, thread_ts: thread });
     };
 
     if (/^(stop|cancel)$/i.test(text)) {
-      await sayThread(agent.cancel(threadKey) ? "Stopped the current turn." : "Nothing is running in this thread.");
+      const n = agent.cancel(threadKey);
+      await sayThread(n === 0 ? "Nothing is running in this thread." : n === 1 ? "Stopped the current turn." : `Stopped ${n} turns.`);
       return;
     }
     if (!text) {
