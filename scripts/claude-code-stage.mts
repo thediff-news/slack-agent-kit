@@ -30,6 +30,7 @@
  *    pipeline's 480s process-group kill.
  */
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { startBudgetProxy } from "./claude-budget-proxy.mjs";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -78,6 +79,26 @@ export async function runStage(args: StageArgs): Promise<void> {
     CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: "4096",
     BASH_MAX_OUTPUT_LENGTH: "4096",
   } as Record<string, string>;
+
+  // HARD spend bound: the budget proxy gates every API request pre-flight
+  // (count_tokens + max_tokens rewrite + cumulative bound). The real key lives
+  // only in the proxy; the CLI receives a placeholder.
+  const realKey = process.env.ANTHROPIC_API_KEY ?? "";
+  let proxy: { port: number; spentBoundUsd: () => number; close: () => void } | undefined;
+  if (realKey) {
+    proxy = await startBudgetProxy({
+      totalUsd: args.maxBudgetUsd ?? 1.90, // per-round hard cap = the round budget
+      model: args.model,
+      maxOutputTokens: 8192,
+      inputRatePerMTok: 2.50, // Sonnet 5.5 cache-write (highest input-side rate), claude.com/pricing
+      outputRatePerMTok: 10,  // Sonnet 5.5 output
+      upstreamBase: "https://api.anthropic.com",
+      realKey,
+    });
+    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}`;
+    env.ANTHROPIC_API_KEY = "budget-proxy-holds-real-key";
+    console.log(`[claude-stage] budget proxy on :${proxy.port} hard cap $${args.maxBudgetUsd ?? 1.90}`);
+  }
 
   const out: Record<string, unknown> = {
     ok: false, subtype: "no_result", resultText: "", numTurns: 0,
@@ -147,6 +168,8 @@ export async function runStage(args: StageArgs): Promise<void> {
     console.log(`[claude-stage] exception ${(e as Error).message.slice(0, 300)}`);
   }
   out.peakInputSideTokens = peakInputSide;
+  out.proxyBoundUsd = proxy ? proxy.spentBoundUsd() : null; // conservative upper bound of this round's actual spend
+  proxy?.close();
   out.durationMs = (out.durationMs as number) || Date.now() - t0;
   writeFileSync(args.resultFile, JSON.stringify(out, null, 2));
   if (!out.ok) process.exitCode = 1;

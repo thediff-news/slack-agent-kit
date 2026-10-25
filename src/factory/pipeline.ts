@@ -482,13 +482,24 @@ export async function runFactory(opts: FactoryOptions): Promise<FactoryResult> {
       const ccModel = opts.claudeModel ?? "claude-sonnet-5";
       const ccTurns = opts.claudeMaxTurns ?? 30;
       const ccBudget = opts.claudeMaxBudgetUsd;
+      const ccTotal = opts.claudeTotalBudgetUsd;
+      // HARD bound: the budget proxy (scripts/claude-budget-proxy.mts) gates every
+      // API request pre-flight - exact count_tokens input + provider-enforced
+      // max_tokens - so a round's ACTUAL spend never exceeds its round budget.
+      // No in-flight overshoot is possible; gate on exact numbers.
+      if (ccTotal !== undefined && ccSpent + (ccBudget ?? 0) > ccTotal) {
+        failure = `budget-stopped: cumulative $${ccSpent.toFixed(3)} + round cap $${ccBudget ?? 0} exceeds total cap $${ccTotal}`;
+        hooks.audit("factory_llm_call", `code round ${round} [claude ${ccModel}]: skipped - ${failure}`);
+        break;
+      }
       const ccSandbox = opts.claudeSandbox ?? true;
       const ccSrt = opts.srtBin ?? process.env.SRT_BIN ?? join(REPO_ROOT, "node_modules", ".bin", "srt");
       const t = Date.now();
       try {
         stageTag = `code round ${round}`;
-        const info = await claudeRound(dir, opts.request, plan, failure, ccModel, ccTurns, ccBudget, ccSandbox, ccSrt);
-        hooks.audit("factory_llm_call", `code round ${round} [claude ${ccModel}${ccSandbox ? " srt-sandboxed" : " UNSANDBOXED"}]: ${Date.now() - t}ms${info}`);
+        const r = await claudeRound(dir, opts.request, plan, failure, ccModel, ccTurns, ccBudget, ccSandbox, ccSrt);
+        ccSpent += r.costUsd;
+        hooks.audit("factory_llm_call", `code round ${round} [claude ${ccModel}${ccSandbox ? " srt-sandboxed" : " UNSANDBOXED"}]: ${Date.now() - t}ms${r.info} cumulative=$${ccSpent.toFixed(3)}`);
       } catch (e) {
         hooks.audit("factory_llm_call", `code round ${round} [claude ${ccModel}]: ${Date.now() - t}ms FAILED`);
         failure = `claude round failed: ${(e as Error).message.slice(0, 500)}`;
