@@ -8,8 +8,11 @@ const realKey = process.env.ANTHROPIC_API_KEY ?? (process.env.SDK_APP_KEY_FILE ?
 if (!realKey) throw new Error("ANTHROPIC_API_KEY (or SDK_APP_KEY_FILE) is required");
 const proxy = await startBudgetProxy({
   totalUsd: Number(process.env.SDK_APP_PROXY_CAP_USD || "2.00"),
-  model: "claude-sonnet-5-5", maxOutputTokens: 4096,
+  // comma-separated allowlist; every non-first model needs a verified price in
+  // SDK_APP_PROXY_RATES (JSON: {"model-id": {"input": <$/MTok>, "output": <$/MTok>}})
+  model: process.env.SDK_APP_PROXY_MODELS || "claude-sonnet-5-5", maxOutputTokens: 4096,
   inputRatePerMTok: 2.50, outputRatePerMTok: 10,
+  rates: (() => { try { return JSON.parse(process.env.SDK_APP_PROXY_RATES || "{}") } catch { return {}; } })(),
   upstreamBase: "https://api.anthropic.com", realKey,
   statePath: process.env.SDK_APP_PROXY_STATE || undefined,
   basisUsd: Number(process.env.SDK_APP_PROXY_BASIS_USD || "0"),

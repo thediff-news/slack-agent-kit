@@ -34,7 +34,7 @@ export class BrowsePolicy {
   }
 }
 
-export type BrowseDeps = { audit: AuditLog; policy: BrowsePolicy; downloadsDir?: string };
+export type BrowseDeps = { audit: AuditLog; policy: BrowsePolicy; downloadsDir?: string; /** Reports every URL the browser lands on (the factory matches its loopback servers to record UI evidence). */ onEvidence?: (url: string, kind: "interact" | "screenshot") => void | Promise<void> };
 
 export class BrowseTools {
   private session?: BrowserSession;
@@ -60,6 +60,7 @@ export class BrowseTools {
     const p = await this.page();
     const r = await act.click(p, target as any);
     this.deps.audit.write("tool_call", { tool: "browse_click", target, ok: r.ok, reason: r.detail });
+    if (r.ok) await this.deps.onEvidence?.(p.url(), "interact");
     return r.ok ? `clicked ${act.describe(target as any)}; now at ${p.url()}` : `click failed: ${r.detail}`;
   }
 
@@ -68,6 +69,7 @@ export class BrowseTools {
     const r = await act.fillForm(p, [{ target: target as any, value: text }]);
     if (pressEnter && r.ok) await p.keyboard.press("Enter");
     this.deps.audit.write("tool_call", { tool: "browse_type", target, pressEnter, ok: r.ok });
+    if (r.ok) await this.deps.onEvidence?.(p.url(), "interact");
     return r.ok ? `typed into ${act.describe(target as any)}` : `type failed: ${r.detail}`;
   }
 
@@ -85,12 +87,25 @@ export class BrowseTools {
     return `URL: ${p.url()}\nTITLE: ${await p.title()}\nARIA:\n${wrapUntrusted(tree.detail)}\nTEXT:\n${wrapUntrusted(text.detail)}`;
   }
 
+  /** Current page URL, or "" when no browser session/page exists yet. */
+  async currentUrl(): Promise<string> {
+    if (!this.session) return "";
+    try { return (await this.page()).url(); } catch { return ""; }
+  }
+
+  /** Plain extracted text of the current page (the app's own read). */
+  async pageText(): Promise<string> {
+    const p = await this.page();
+    return (await act.extractText(p)).detail;
+  }
+
   /** Screenshot the current page to a PNG file and return its path. */
   async screenshotFile(): Promise<string> {
     const p = await this.page();
     const f = join(this.deps.downloadsDir ?? "/tmp/sdk-app-downloads", `shot-${Date.now()}.png`);
     await act.screenshot(p, f);
     this.deps.audit.write("tool_call", { tool: "browse_screenshot", url: p.url(), file: f });
+    await this.deps.onEvidence?.(p.url(), "screenshot");
     return f;
   }
 

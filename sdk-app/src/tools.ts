@@ -13,7 +13,7 @@ const run = promisify(execFile);
 
 /** Names of the in-process tools the agent loop can call. Read tools are
  * auto-allowed; mutating tools go through the approval gate (agent.ts). */
-export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups", "factory_clone", "factory_read_file", "factory_list_files", "factory_write_file", "factory_run_checks", "factory_scan_diff", "factory_screenshot", "factory_serve"] as const;
+export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups", "factory_clone", "factory_read_file", "factory_list_files", "factory_write_file", "factory_run_checks", "factory_scan_diff", "factory_screenshot", "factory_serve", "factory_record_ui_state"] as const;
 export const BROWSE_GATED_TOOLS = ["browse_open", "browse_click", "browse_type"] as const;
 export const MUTATING_TOOLS = ["github_create_issue", "factory_create_pr"] as const;
 export const SERVER_NAME = "kit";
@@ -31,6 +31,9 @@ export type ToolsDeps = {
   /** Requester's retrieval ACL tags; undefined = unfiltered (operator surface).
    * Slack surfaces always pass a concrete list (unknown users: ["public"]). */
   aclTags?: string[];
+  /** The turn this server was built for: factory_clone seeds the case's
+   * workflow state from it (a report with images is a UI case). */
+  turnCtx?: { threadKey?: string; hasImages?: boolean };
 };
 
 /** The kit's capabilities, exposed to the Claude Agent SDK loop as an
@@ -151,7 +154,7 @@ export function buildKitServer(deps: ToolsDeps) {
 
   const factoryTools = deps.factory
     ? [
-        tool("factory_clone", "Clone an allowlisted repo (or local fixture path) into an isolated factory workspace and start a factory/* branch. Pass ref when the fix targets a non-default branch (e.g. a branch under review).", { repo: z.string(), ref: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.clone(a.repo, a.ref) }] })),
+        tool("factory_clone", "Clone an allowlisted repo (or local fixture path) into an isolated factory workspace and start a factory/* branch. Pass ref when the fix targets a non-default branch (e.g. a branch under review).", { repo: z.string(), ref: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.clone(a.repo, a.ref, deps.turnCtx) }] })),
         tool("factory_list_files", "List files in the factory clone.", { repo: z.string(), subdir: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.listFiles(a.repo, a.subdir) }] })),
         tool("factory_read_file", "Read a file inside the factory clone.", { repo: z.string(), path: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.readFile(a.repo, a.path) }] })),
         tool("factory_write_file", "Write a file inside the factory clone (scratch workspace; the PR gate protects the real repo).", { repo: z.string(), path: z.string(), content: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.writeFile(a.repo, a.path, a.content) }] })),
@@ -166,6 +169,7 @@ export function buildKitServer(deps: ToolsDeps) {
           return { content: [{ type: "text" as const, text: `screenshot of ${a.htmlPath} after \`${a.cmd}\`: ${posted}` }, { type: "image" as const, data: readFileSync(r.path).toString("base64"), mimeType: "image/png" as const }] };
         }),
         tool("factory_serve", "Serve a directory of the factory clone on a local-only HTTP port so you can open it with browse_open and test the UI (static files only, 127.0.0.1). Returns the URL.", { repo: z.string(), subdir: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.serve(a.repo, a.subdir) }] })),
+        tool("factory_record_ui_state", "Record what you OBSERVED in the UI (exact text visible on the page) and what it means, for before-fix (broken state) and after-fix (corrected state) evidence. The app independently re-reads the live page and rejects claims that do not match it. Required for UI bug cases before a PR can open.", { repo: z.string(), phase: z.enum(["before", "after"]), observed: z.string(), meaning: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.recordUiState(a.repo, a.phase, a.observed, a.meaning) }] })),
         tool("factory_create_pr", "MUTATING: commit the clone's changes, push the factory branch and open a DRAFT PR. Requires human approval; never merges, never pushes to main. Dry-run unless armed.", { repo: z.string(), title: z.string(), body: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.createPr(a.repo, a.title, a.body) }] }), { annotations: { destructiveHint: true } }),
       ]
     : [];

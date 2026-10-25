@@ -35,6 +35,7 @@ function fixtureClone(withStateFile: boolean) {
 
 test("createPr: committed-but-unpushed work is a real PR, not 'nothing to do'", async () => {
   const { tools } = fixtureClone(false);
+  await tools.__seedWorkflowForTests("owner/name");
   const out = await tools.createPr("owner/name", "t", "b"); // dry-run default
   assert.doesNotMatch(out, /nothing to do/);
   assert.match(out, /would push factory\/sdk-test and open a PR/);
@@ -44,6 +45,7 @@ test("createPr: committed-but-unpushed work is a real PR, not 'nothing to do'", 
 
 test("createPr: app state files never enter the PR and are named as excluded", async () => {
   const { tools } = fixtureClone(true);
+  await tools.__seedWorkflowForTests("owner/name");
   const out = await tools.createPr("owner/name", "t", "b");
   assert.match(out, /EXCLUDED \(never auto-PR'd state\): sdk-app\/state\/sessions\.json/);
   assert.doesNotMatch(out.split("EXCLUDED")[0], /sessions\.json/); // not in the stat
@@ -52,12 +54,15 @@ test("createPr: app state files never enter the PR and are named as excluded", a
 test("createPr: approval binds the exact diff - a changed branch invalidates it", async () => {
   const { tools, dir } = fixtureClone(false);
   const fp = await tools.prFingerprint("owner/name", "t", "b");
+  // note: prFingerprint itself needs no workflow evidence
   assert.match(fp, /^[0-9a-f]{64}$/);
   writeFileSync(join(dir, "fix.ts"), "export const fix = 2;\n"); // branch changes after approval
+  await tools.__seedWorkflowForTests("owner/name"); // fresh evidence on the changed tree
   const refused = await tools.createPr("owner/name", "t", "b");
   assert.match(refused, /REFUSED: the branch changed after approval/);
   // unchanged branch passes the binding and returns the plan
   await tools.prFingerprint("owner/name", "t", "b");
+  await tools.__seedWorkflowForTests("owner/name");
   const ok = await tools.createPr("owner/name", "t", "b");
   assert.match(ok, /DIFF HASH/);
 });

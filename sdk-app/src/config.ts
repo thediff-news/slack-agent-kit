@@ -4,6 +4,12 @@ export type Capability = "read" | "propose" | "execute" | "approve";
 export type AppConfig = {
   /** Model the SDK loop runs on. */
   model: string;
+  /** Optional cheaper model for turns that carry no factory signals at all
+   * (plain chat). Empty = every turn runs `model`. The SDK fixes the model per
+   * query() turn, so a chat-classified turn that escalates mid-turn stays on
+   * the chat model until the next message; the classifier therefore errs
+   * toward `model` on any ambiguity. */
+  chatModel: string;
   /** Root dir the filesystem connector indexes (docs the agent can search). */
   docsRoot: string;
   /** GitHub repos the github connector can search, e.g. ["thediff-news/slack-agent-kit"]. */
@@ -57,6 +63,18 @@ export type AppConfig = {
   capsFor(userId: string | undefined, operator: boolean): Capability[];
 };
 
+/** Words that mark a turn as factory-grade work (or a screenshot rides in).
+ * Conservative on purpose: misses cost quality, false positives only cost money. */
+const FACTORY_SIGNAL = /\b(bug|error|fix|broken|wrong|fail\w*|crash|regression|screenshot|repo|commit|branch|pr|pull request|deploy|implement|refactor|test|issue|incident|stack\s?trace|exception|slow\w*|investigat\w*|triage)\b/i;
+
+/** Per-turn model routing. Any factory signal or an attached image -> the main
+ * model; only plainly conversational turns take chatModel. */
+export function pickModel(cfg: Pick<AppConfig, "model" | "chatModel">, text: string, hasImages: boolean): string {
+  if (!cfg.chatModel || cfg.chatModel === cfg.model) return cfg.model;
+  if (hasImages) return cfg.model;
+  return FACTORY_SIGNAL.test(text) ? cfg.model : cfg.chatModel;
+}
+
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
   let userAcls: Record<string, string[]> = {};
   try {
@@ -67,6 +85,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const j = (raw?: string): any => { try { return JSON.parse(raw || "{}") } catch { return {}; } };
   const cfg: AppConfig = {
     model: env.SDK_APP_MODEL || "claude-sonnet-5-5",
+    chatModel: env.SDK_APP_MODEL_CHAT || "",
     docsRoot: env.SDK_APP_DOCS_ROOT || "docs",
     githubRepos: (env.SDK_APP_GITHUB_REPOS || "").split(",").map((s) => s.trim()).filter(Boolean),
     auditLog: env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.jsonl",

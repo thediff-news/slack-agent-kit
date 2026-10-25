@@ -10,8 +10,8 @@
 import { App } from "@slack/bolt";
 import { buildRuntime } from "./runtime.js";
 import type { InputImage } from "./agent.js";
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -81,8 +81,42 @@ export function renderError(err: unknown): string {
   return "Something went wrong on my side while working on that. The details are in the audit log.";
 }
 
+/** Fail fast at boot, not mid-run: every missing credential here used to
+ * surface as a confusing failure deep inside a live case. */
+export function preflightProblems(env: NodeJS.ProcessEnv): string[] {
+  const p: string[] = [];
+  if (!env.SLACK_BOT_TOKEN?.startsWith("xoxb-")) p.push("SLACK_BOT_TOKEN missing or not an xoxb- bot token");
+  if (!env.SLACK_APP_TOKEN?.startsWith("xapp-")) p.push("SLACK_APP_TOKEN missing or not an xapp- app-level token");
+  if (env.SDK_APP_DRY_RUN === "0" && !env.GH_TOKEN) p.push("armed (SDK_APP_DRY_RUN=0) but GH_TOKEN missing: factory pushes use `gh auth git-credential` and would fail mid-case");
+  if (!env.ANTHROPIC_API_KEY && !env.SDK_APP_KEY_FILE) p.push("no Anthropic credential: ANTHROPIC_API_KEY or SDK_APP_KEY_FILE required");
+  return p;
+}
+
+/** One Slack instance per state dir: two processes share the socket and the
+ * factory clones and silently corrupt each other (observed live: a stale
+ * process voided a full test run). Live-pid checked; stale locks are replaced. */
+export function acquireInstanceLock(path: string, pid: number = process.pid, alive: (p: number) => boolean = (p) => { try { process.kill(p, 0); return true; } catch { return false; } }): void {
+  if (existsSync(path)) {
+    const other = Number(readFileSync(path, "utf8").split("\n")[0]);
+    if (other && other !== pid && alive(other)) {
+      throw new Error(`another sdk-app Slack instance is already running (pid ${other}, lock ${path}). Stop it first: two instances share the Slack socket and the factory clones.`);
+    }
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${pid}\n${new Date().toISOString()}\n`);
+  const cleanup = () => {
+    try { if (readFileSync(path, "utf8").split("\n")[0] === String(pid)) rmSync(path, { force: true }); } catch { /* already gone */ }
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => { cleanup(); process.exit(130); });
+  process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+}
+
 export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const problems = preflightProblems(env);
+  if (problems.length) throw new Error(`sdk-app preflight failed:\n- ${problems.join("\n- ")}`);
   const { config, approvals, agent, audit } = await buildRuntime(env);
+  acquireInstanceLock(config.auditLog.replace(/[^/]+$/, "slack-app.lock"));
 
   const bolt = new App({ token: env.SLACK_BOT_TOKEN, appToken: env.SLACK_APP_TOKEN, socketMode: true });
 
@@ -137,17 +171,45 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
       }
       return;
     }
+    // Compact live status in the thread: working state with tool count and
+    // elapsed, and an honest final state (done/failed/stopped - never "Done"
+    // over unfinished work). Approval waiting is measured separately from
+    // execution so speed claims never hide human time.
+    const t0 = Date.now();
+    let toolCalls = 0;
+    let approvalWaitMs = 0;
+    let cancelled = false;
+    let statusTs: string | undefined;
+    let lastStatusPush = 0;
+    const elapsed = () => Math.round((Date.now() - t0) / 1000);
+    const pushStatus = async (finalText?: string) => {
+      if (!statusTs) return;
+      const now = Date.now();
+      if (!finalText && now - lastStatusPush < 4000) return;
+      lastStatusPush = now;
+      await bolt.client.chat.update({ channel: event.channel, ts: statusTs, text: finalText ?? `:hourglass_flowing_sand: Working... ${toolCalls} tool calls, ${elapsed()}s` }).catch(() => {});
+    };
     try {
+      const statusMsg = await say({ text: `:hourglass_flowing_sand: Working...`, thread_ts: thread });
+      statusTs = (statusMsg as any)?.ts;
       await agent.chat(threadKey, text, {
         onText: (t) => { void sayThread(t); },
         onApprovalNeeded: (id, summary) => { void sayThread(`Approval needed (${id}): ${summary}\nReply in thread: approve ${id} / deny ${id}`); },
+        onToolUse: () => { toolCalls++; void pushStatus(); },
+        onApprovalResolved: (ms) => { approvalWaitMs += ms; },
+        onCancelled: () => { cancelled = true; },
       }, {
         userId: event.user, surface: "slack", channelId: event.channel, images,
         emitImage: async (path, title) => {
           await bolt.client.filesUploadV2({ channel_id: event.channel, thread_ts: thread, file: readFileSync(path), filename: basename(path), title, initial_comment: title });
         },
       });
+      const waitPart = approvalWaitMs > 1000 ? `, of which ~${Math.round(approvalWaitMs / 1000)}s waiting on approval` : "";
+      await pushStatus(cancelled
+        ? `:octagonal_sign: Stopped by user after ${elapsed()}s (${toolCalls} tool calls).`
+        : `:white_check_mark: Done: ${toolCalls} tool calls, ${elapsed()}s total${waitPart}.`);
     } catch (err) {
+      await pushStatus(`:x: Failed after ${elapsed()}s (${toolCalls} tool calls) - details above.`);
       await sayThread(renderError(err));
     }
   };

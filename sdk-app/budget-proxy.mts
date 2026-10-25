@@ -37,6 +37,10 @@ export interface ProxyConfig {
   maxOutputTokens: number; // enforced max_tokens ceiling, e.g. 8192
   inputRatePerMTok: number;  // highest input-side rate (cache write): 2.50
   outputRatePerMTok: number; // 10
+  /** Verified per-model prices (USD per MTok) for every model the allowlist
+   * admits beyond `model`. A request for a model with no known price is
+   * REJECTED: bounding a stronger model at sonnet rates would under-reserve. */
+  rates?: Record<string, { input: number; output: number }>;
   upstreamBase: string;    // https://api.anthropic.com (or http://127.0.0.1:x for tests)
   realKey: string;
   /** Optional durable ledger: cumulative bound survives process restarts, so
@@ -218,11 +222,19 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       // gate POST /v1/messages
       let body: any;
       try { body = JSON.parse(raw); } catch { clientRes.writeHead(400).end('{"error":"bad json"}'); return; }
-      if (body.model !== cfg.model) {
+      const allowedModels = cfg.model.split(",").map((m) => m.trim()).filter(Boolean);
+      if (!allowedModels.includes(body.model)) {
         clientRes.writeHead(403, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_model", message: `budget proxy allows only ${cfg.model}, got ${body.model}` } }));
         return;
       }
+      const rate = cfg.rates?.[body.model] ?? (body.model === allowedModels[0] ? { input: cfg.inputRatePerMTok, output: cfg.outputRatePerMTok } : undefined);
+      if (!rate) {
+        clientRes.writeHead(403, { "content-type": "application/json" });
+        clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_price", message: `no verified price configured for ${body.model}; refusing to guess a spend bound` } }));
+        return;
+      }
+      const priceCfg = { inputRatePerMTok: rate.input, outputRatePerMTok: rate.output };
       const serverTool = (body.tools ?? []).find((t: any) => /web_search|web_fetch|code_execution/i.test(String(t?.type ?? "")));
       if (serverTool) {
         clientRes.writeHead(403, { "content-type": "application/json" });
@@ -255,7 +267,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
         return;
       }
       const inputTokens = Number(JSON.parse(cr.body).input_tokens ?? 0);
-      const boundExact = requestBoundUsd(inputTokens, body.max_tokens, cfg);
+      const boundExact = requestBoundUsd(inputTokens, body.max_tokens, priceCfg);
       console.log(`[budget-proxy] ${new Date().toISOString()} gate req counted_input=${inputTokens} max_tokens=${body.max_tokens} bound_usd=${boundExact.toFixed(6)} cumulative_before_usd=${cumulative.toFixed(6)}`);
       const bound = boundExact;
       if (basis + cumulative + bound > cfg.totalUsd) {
@@ -290,7 +302,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
           const complete = isSse ? /"type"\s*:\s*"message_stop"/.test(text) : usage !== null;
           console.log(`[budget-proxy] ${new Date().toISOString()} settle_attempt via=${via} bytes=${raw.length} decompressed=${decompressed} parsed=${usage ? "yes" : "no"} complete=${complete}`);
           if (!usage || !complete) return; // safe direction: unknown liability keeps the bound
-          const settled = settledCostUsd(usage, cfg);
+          const settled = settledCostUsd(usage, priceCfg);
           if (settled < bound) {
             cumulative = cumulative - bound + settled;
             persist();

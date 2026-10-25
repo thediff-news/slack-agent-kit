@@ -7,7 +7,8 @@ local CLI; both drive the same AgentCore.
 
 ## Prerequisites
 
-- Node 22+, `npm install` at the repo root, `npx playwright install chromium-headless-shell` (browse tools only).
+- Node 22+, `npm ci && npm rebuild better-sqlite3 && npx playwright install chromium-headless-shell` at the repo root (the rebuild restores the RAG store's native bindings after `--ignore-scripts` installs; the browser download backs every browse test).
+- The Slack surface runs ONE instance per state dir (live-pid lockfile) and preflights tokens/armed-mode credentials at boot - it fails fast, never mid-case.
 - Env: `SLACK_BOT_TOKEN` (xoxb-), `SLACK_APP_TOKEN` (xapp-, socket mode), `ANTHROPIC_API_KEY`.
 - Optional SaaS reads: `ATLASSIAN_SITE` (with https://), `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`, `NOTION_API_KEY`.
 
@@ -36,6 +37,9 @@ machine with outbound HTTPS.
 | env | meaning | default |
 |---|---|---|
 | `SDK_APP_MODEL` | agent model | `claude-sonnet-5-5` |
+| `SDK_APP_MODEL_CHAT` | optional cheaper model for plainly conversational turns (per-turn routing; any factory signal or attached image keeps the main model) | off |
+| `SDK_APP_PROXY_MODELS` | comma-separated model allowlist for the budget proxy | `claude-sonnet-5-5` |
+| `SDK_APP_PROXY_RATES` | JSON verified per-model prices; REQUIRED for each non-default allowlisted model (unpriced models are rejected, never bounded at assumed rates) | - |
 | `SDK_APP_DOCS_ROOT` | filesystem docs root | `docs` |
 | `SDK_APP_GITHUB_REPOS` | comma-separated repos the github connector reads | - |
 | `SDK_APP_CONNECTORS` | JSON array: filesystem/github/web/slack-history/jira/confluence/notion | legacy fs+github |

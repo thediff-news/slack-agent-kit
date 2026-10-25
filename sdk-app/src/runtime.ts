@@ -24,13 +24,25 @@ export async function buildRuntime(env: NodeJS.ProcessEnv = process.env, queryFn
     await ragStore.syncDocsRoot(config.docsRoot).catch(() => 0);
   }
   const browsePolicy = new BrowsePolicy(config.auditLog.replace(/[^/]+$/, "browse-allowlist.json"), config.browseAllowlist);
-  const browse = new BrowseTools({ audit, policy: browsePolicy });
-  const factory = new FactoryTools({ config, audit });
+  const browseHolder: { b?: BrowseTools } = {};
+  const factory = new FactoryTools({
+    config,
+    audit,
+    pageState: async () => {
+      const b = browseHolder.b;
+      if (!b) return undefined;
+      const url = await b.currentUrl().catch(() => "");
+      if (!url || url === "about:blank") return undefined;
+      return { url, text: await b.pageText().catch(() => "") };
+    },
+  });
+  const browse = new BrowseTools({ audit, policy: browsePolicy, onEvidence: (url, kind) => { void factory.noteBrowseEvidence(url, kind); } });
+  browseHolder.b = browse;
   // Per-turn server: the requester's ACL tags ride into search/get_doc, so a
   // Slack user only ever sees docs their identity may read (unknown = public).
-  const mcpServerFactory = (ctx: { userId?: string; surface?: "cli" | "slack"; emitImage?: (path: string, title: string) => Promise<void> }) =>
-    buildKitServer({ connectors, config, audit, ragStore, browse, factory, emitImage: ctx.emitImage, aclTags: ctx.surface === "slack" ? config.aclTagsFor(ctx.userId) : undefined });
+  const mcpServerFactory = (ctx: { userId?: string; surface?: "cli" | "slack"; threadKey?: string; images?: unknown[]; emitImage?: (path: string, title: string) => Promise<void> }) =>
+    buildKitServer({ connectors, config, audit, ragStore, browse, factory, emitImage: ctx.emitImage, aclTags: ctx.surface === "slack" ? config.aclTagsFor(ctx.userId) : undefined, turnCtx: { threadKey: ctx.threadKey, hasImages: Array.isArray(ctx.images) && ctx.images.length > 0 } });
   const agent = new AgentCore({ config, mcpServerFactory, approvals, audit, queryFn, browsePolicy, factory });
   const close = async () => { await browse.close(); await factory.close(); ragStore.rag.close(); };
-  return { config, audit, approvals, agent, ragStore, browsePolicy, close };
+  return { config, audit, approvals, agent, ragStore, browsePolicy, factory, close };
 }

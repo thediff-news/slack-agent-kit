@@ -49,11 +49,29 @@ Env: `SDK_APP_MODEL` (default claude-sonnet-5-5), `SDK_APP_DOCS_ROOT`,
 `SDK_APP_DRY_RUN=0` arms the mutating tool (default: simulate),
 `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` (budget proxy) are passed to sessions.
 
+## Factory workflow gates (enforced, not prompted)
+
+A bug-fix case collects evidence from ACTUAL tool calls into a per-case ledger
+(app state dir, never inside the clone where repo code could forge it):
+
+- source edits are refused until reproduction evidence exists: a failing test
+  run (real exit code) captured while the source is untouched, or - for UI
+  cases (screenshot attached, or the clone was served/rendered) - browser
+  interaction + screenshot evidence against the factory's loopback server,
+  plus a `factory_record_ui_state` observation the app independently re-reads
+  from the live page and rejects when it does not match;
+- `factory_create_pr` refuses without: repro evidence, a passing full test run
+  on the FINAL diff, and (UI cases) fresh after-fix screenshot + verified
+  observation on the final diff. Freshness is a git tree hash (HEAD + full
+  diff incl. untracked), so edits made outside the tools still invalidate it.
+
+Non-UI bugs prove out with the failing test alone; test files are always
+writable (the failing regression test is the first step, never deadlocked).
+
 ## Verification
 
-- `npx tsx --test sdk-app/tests/*.test.ts` — 9 tests, no API calls:
-  approvals resolve-once/deny/restart-resurface, tool handlers, session
-  resume, streaming, per-turn cost audit, mutating-tool gate
-  (approve→allow, deny→deny), built-in Bash default-denied.
-- Live smoke through the budget proxy: see PR description (cost, turns,
-  approval flow exercised end-to-end against the real model).
+- `npx tsx --test sdk-app/tests/*.test.ts` — no API calls.
+- Fresh clone setup: `npm ci && npm rebuild better-sqlite3 && npx playwright install chromium-headless-shell`
+  (skipping the rebuild leaves the RAG store without native bindings; skipping
+  the browser install fails every browse test).
+- Live smoke through the budget proxy: see PR description.

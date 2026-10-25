@@ -27,6 +27,7 @@ test("clone local fixture, read/write/run the repo's own checks", async () => {
   const out = await f.clone(src);
   assert.match(out, /cloned .* on branch factory\/sdk-/);
   assert.match(await f.readFile(src, "app.sh"), /echo v1/);
+  await f.__seedWorkflowForTests(src); // PR-mechanics fixture: skip the evidence flow (covered in factory-workflow.test.ts)
   await f.writeFile(src, "app.sh", "echo v2\n");
   assert.match(await f.runChecks(src, "npm test"), /v2/, "checks run the EDITED code in the clone");
   assert.match(await f.runChecks(src, "git status"), /factory\/sdk-/);
@@ -55,6 +56,7 @@ test("secret scan catches keys in the diff; PR is dry-run and fixture-blocked", 
   await f.clone(src);
   let scan = await f.scanDiff(src);
   assert.equal(scan.clean, true);
+  await f.__seedWorkflowForTests(src);
   await f.writeFile(src, "leak.txt", "token = xoxb-aaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
   scan = await f.scanDiff(src);
   assert.equal(scan.clean, false, "slack token in new content flagged");
@@ -121,6 +123,7 @@ test("resolveRef: short SHA outside the shallow window resolves via gh api + dir
 test("factory_serve: loopback only, path traversal blocked, subdir escape refused", async () => {
   const { src, f } = await fixture();
   await f.clone(src);
+  await f.__seedWorkflowForTests(src);
   await f.writeFile(src, "index.html", "<h1>ok</h1>");
   const msg = await f.serve(src);
   const base = msg.match(/http:\/\/127\.0\.0\.1:\d+\//)![0];
