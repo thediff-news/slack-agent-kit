@@ -40,7 +40,10 @@ export class AgentCore {
   constructor(
     private deps: {
       config: AppConfig;
-      mcpServer: ReturnType<typeof import("./tools.js").buildKitServer>;
+      mcpServer?: ReturnType<typeof import("./tools.js").buildKitServer>;
+      /** Per-turn server builder: carries requester identity into tool ACLs.
+       * When present, wins over the fixed mcpServer. */
+      mcpServerFactory?: (ctx: TurnContext & { threadKey: string }) => ReturnType<typeof import("./tools.js").buildKitServer>;
       approvals: ApprovalStore;
       audit: AuditLog;
       queryFn?: QueryFn;
@@ -58,19 +61,32 @@ export class AgentCore {
 
   /** Handle one user message; resolves when the turn (and any gated tool decisions) completes.
    * Concurrent calls for the same thread queue in arrival order. */
-  async chat(threadKey: string, userText: string, handlers: ChatHandlers = {}): Promise<void> {
+  async chat(threadKey: string, userText: string, handlers: ChatHandlers = {}, ctx: TurnContext = {}): Promise<void> {
     const prior = this.turns.get(threadKey) ?? Promise.resolve();
-    const run = prior.then(() => this.chatInner(threadKey, userText, handlers));
+    const run = prior.then(() => this.chatInner(threadKey, userText, handlers, ctx));
     this.turns.set(threadKey, run.catch(() => {}));
     return run;
   }
 
-  private async chatInner(threadKey: string, userText: string, handlers: ChatHandlers): Promise<void> {
-    const { config, mcpServer, approvals, audit } = this.deps;
+  private async chatInner(threadKey: string, userText: string, handlers: ChatHandlers, ctx: TurnContext = {}): Promise<void> {
+    const { config, approvals, audit } = this.deps;
+    const mcpServer = this.deps.mcpServerFactory ? this.deps.mcpServerFactory({ threadKey, ...ctx }) : this.deps.mcpServer!;
     const queryFn = this.deps.queryFn ?? query;
-    audit.write("message_in", { text: userText.slice(0, 500) }, threadKey);
+    // Identity tier: only an enrolled identity (operator CLI, or a Slack user
+    // bound in SDK_APP_USER_ACLS / SDK_APP_APPROVERS) may touch factory,
+    // browser or write capabilities. Unknown Slack users get public docs only.
+    const operator = ctx.surface !== "slack";
+    const known = operator || config.isKnownIdentity(ctx.userId);
+    audit.write("message_in", { text: userText.slice(0, 500), user: ctx.userId ?? "operator", known }, threadKey);
 
     const canUseTool = async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
+      if (!known) {
+        const short = toolName.startsWith(`mcp__${SERVER_NAME}__`) ? toolName.slice(`mcp__${SERVER_NAME}__`.length) : toolName;
+        if (short.startsWith("factory_") || short.startsWith("browse_") || (MUTATING_TOOLS as readonly string[]).includes(short)) {
+          audit.write("identity_denied", { tool: short, user: ctx.userId ?? "unknown" }, threadKey);
+          return { behavior: "deny", message: "Your identity is not enrolled in this app; factory, browser and write capabilities stay locked until an admin enrolls you. You can search public docs." };
+        }
+      }
       // Browse guardrails (kit semantics): out-of-allowlist hosts and
       // irreversible clicks need a human; host approvals persist.
       if (this.deps.browsePolicy && (BROWSE_GATED_TOOLS as readonly string[]).some((b) => toolName === qualified(b))) {
@@ -120,7 +136,9 @@ export class AgentCore {
       model: config.model,
       systemPrompt: SYSTEM_PROMPT,
       mcpServers: { [SERVER_NAME]: mcpServer },
-      allowedTools: [...READ_TOOLS.map(qualified)],
+      // Unknown identities: only the public-doc read tools are pre-allowed;
+      // everything else routes through canUseTool, which denies it above.
+      allowedTools: (known ? [...READ_TOOLS] : ["search_docs", "get_doc", "sync_docs"]).map(qualified),
       tools: [], // no built-in CLI tools; the agent only gets the kit MCP server
       canUseTool,
       permissionMode: "default",

@@ -22,10 +22,23 @@ export type AppConfig = {
   browseAllowlist: string[];
   /** Named approvers (Slack user IDs) for the Slack surface. */
   approvers: string[];
+  /** Slack user ID -> RAG ACL tags (SDK_APP_USER_ACLS JSON, e.g. {"U123":["engineering"]}).
+   * Unknown users get ["public"]; a user tagged "*" sees everything. */
+  userAcls: Record<string, string[]>;
+  /** Retrieval ACL tags for a requester: undefined = unfiltered (operator/"*"). */
+  aclTagsFor(userId?: string): string[] | undefined;
+  /** A requester we can bind to a configured identity (ACL entry or named approver). */
+  isKnownIdentity(userId?: string): boolean;
 };
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  return {
+  let userAcls: Record<string, string[]> = {};
+  try {
+    userAcls = JSON.parse(env.SDK_APP_USER_ACLS || "{}") as Record<string, string[]>;
+  } catch {
+    userAcls = {}; // fail closed: a broken map grants nothing
+  }
+  const cfg: AppConfig = {
     model: env.SDK_APP_MODEL || "claude-sonnet-5-5",
     docsRoot: env.SDK_APP_DOCS_ROOT || "docs",
     githubRepos: (env.SDK_APP_GITHUB_REPOS || "").split(",").map((s) => s.trim()).filter(Boolean),
@@ -36,9 +49,19 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ragDb: env.SDK_APP_RAG_DB || "sdk-app/state/rag.db",
     browseAllowlist: (env.SDK_APP_BROWSE_ALLOWLIST || "").split(",").map((x) => x.trim()).filter(Boolean),
     approvers: (env.SDK_APP_APPROVERS || "").split(",").map((x) => x.trim()).filter(Boolean),
+    userAcls,
     sessionEnv: {
       ...(env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY } : {}),
       ...(env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL } : {}),
     },
+    aclTagsFor(userId?: string) {
+      const extra = (userId && userAcls[userId]) || [];
+      if (extra.includes("*")) return undefined; // unfiltered
+      return [...new Set(["public", ...extra])];
+    },
+    isKnownIdentity(userId?: string) {
+      return Boolean(userId && (userAcls[userId] !== undefined || cfg.approvers.includes(userId)));
+    },
   };
+  return cfg;
 }

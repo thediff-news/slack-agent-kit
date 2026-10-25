@@ -28,8 +28,11 @@ export async function buildRuntime(env: NodeJS.ProcessEnv = process.env, queryFn
   const browsePolicy = new BrowsePolicy(config.auditLog.replace(/[^/]+$/, "browse-allowlist.json"), config.browseAllowlist);
   const browse = new BrowseTools({ audit, policy: browsePolicy });
   const factory = new FactoryTools({ config, audit });
-  const mcpServer = buildKitServer({ connectors, config, audit, ragStore, browse, factory });
-  const agent = new AgentCore({ config, mcpServer, approvals, audit, queryFn, browsePolicy });
+  // Per-turn server: the requester's ACL tags ride into search/get_doc, so a
+  // Slack user only ever sees docs their identity may read (unknown = public).
+  const mcpServerFactory = (ctx: { userId?: string; surface?: "cli" | "slack" }) =>
+    buildKitServer({ connectors, config, audit, ragStore, browse, factory, aclTags: ctx.surface === "slack" ? config.aclTagsFor(ctx.userId) : undefined });
+  const agent = new AgentCore({ config, mcpServerFactory, approvals, audit, queryFn, browsePolicy });
   const close = async () => { await browse.close(); ragStore.rag.close(); };
   return { config, audit, approvals, agent, ragStore, browsePolicy, close };
 }

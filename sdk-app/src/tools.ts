@@ -26,6 +26,9 @@ export type ToolsDeps = {
   ragStore?: RagStore;
   browse?: BrowseTools;
   factory?: FactoryTools;
+  /** Requester's retrieval ACL tags; undefined = unfiltered (operator surface).
+   * Slack surfaces always pass a concrete list (unknown users: ["public"]). */
+  aclTags?: string[];
 };
 
 /** The kit's capabilities, exposed to the Claude Agent SDK loop as an
@@ -42,13 +45,15 @@ export type ToolHandlers = {
 /** Raw handlers, exported so they can be unit-tested without the MCP plumbing. */
 export function buildToolHandlers(deps: ToolsDeps): ToolHandlers {
   const { connectors, config, audit } = deps;
+  const aclAllows = (acl?: string) =>
+    deps.aclTags === undefined || !acl || deps.aclTags.includes("*") || deps.aclTags.includes(acl);
   return {
     async searchDocs(args) {
       const limit = args.limit ?? 8;
       // Ranked RAG retrieval when the index has content; live connector
       // substring search as fallback until the first sync runs.
       if (deps.ragStore && deps.ragStore.rag.count() > 0) {
-        const ranked = await deps.ragStore.rag.retrieve(args.query, limit);
+        const ranked = await deps.ragStore.rag.retrieve(args.query, limit, deps.aclTags);
         if (ranked.length) {
           audit.write("tool_call", { tool: "search_docs", query: args.query, hits: ranked.length, via: "rag" });
           const text = ranked.map((r: any) => `SOURCE: ${r.source}\nSCORE: ${r.score.toFixed(3)}\n${r.text.slice(0, 600)}`).join("\n\n---\n\n");
@@ -57,7 +62,7 @@ export function buildToolHandlers(deps: ToolsDeps): ToolHandlers {
         // RAG missed (its exact-shared-token guard is strict) - fall through
         // to the live connector scan instead of returning empty.
       }
-      const hits = (await Promise.all(connectors.map((c) => c.search(args.query, limit).catch(() => [])))).flat().slice(0, limit);
+      const hits = (await Promise.all(connectors.map((c) => c.search(args.query, limit).catch(() => [])))).flat().filter((h) => aclAllows(h.acl)).slice(0, limit);
       audit.write("tool_call", { tool: "search_docs", query: args.query, hits: hits.length, via: "connector-scan" });
       const text = hits.length
         ? hits.map((h) => `ID: ${h.id}\nTITLE: ${h.title}${h.url ? `\nURL: ${h.url}` : ""}\n${h.body.slice(0, 600)}`).join("\n\n---\n\n")
@@ -68,6 +73,10 @@ export function buildToolHandlers(deps: ToolsDeps): ToolHandlers {
       for (const c of connectors) {
         const doc = await c.get(args.id).catch(() => undefined);
         if (doc) {
+          if (!aclAllows(doc.acl)) {
+            audit.write("tool_call", { tool: "get_doc", id: args.id, found: true, aclDenied: true });
+            return { content: [{ type: "text" as const, text: `Access denied: document ${args.id} is not visible to you.` }], isError: true };
+          }
           audit.write("tool_call", { tool: "get_doc", id: args.id, found: true });
           return { content: [{ type: "text" as const, text: `ID: ${doc.id}\nTITLE: ${doc.title}${doc.url ? `\nURL: ${doc.url}` : ""}\n\n${doc.body}` }] };
         }
