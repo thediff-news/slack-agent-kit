@@ -13,7 +13,7 @@ const run = promisify(execFile);
 
 /** Names of the in-process tools the agent loop can call. Read tools are
  * auto-allowed; mutating tools go through the approval gate (agent.ts). */
-export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups", "factory_clone", "factory_read_file", "factory_list_files", "factory_write_file", "factory_run_checks", "factory_scan_diff"] as const;
+export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups", "factory_clone", "factory_read_file", "factory_list_files", "factory_write_file", "factory_run_checks", "factory_scan_diff", "factory_screenshot", "factory_serve"] as const;
 export const BROWSE_GATED_TOOLS = ["browse_open", "browse_click", "browse_type"] as const;
 export const MUTATING_TOOLS = ["github_create_issue", "factory_create_pr"] as const;
 export const SERVER_NAME = "kit";
@@ -26,6 +26,8 @@ export type ToolsDeps = {
   ragStore?: RagStore;
   browse?: BrowseTools;
   factory?: FactoryTools;
+  /** Surface hook: post an image file back into the conversation. */
+  emitImage?: (path: string, title: string) => Promise<void>;
   /** Requester's retrieval ACL tags; undefined = unfiltered (operator surface).
    * Slack surfaces always pass a concrete list (unknown users: ["public"]). */
   aclTags?: string[];
@@ -155,6 +157,15 @@ export function buildKitServer(deps: ToolsDeps) {
         tool("factory_write_file", "Write a file inside the factory clone (scratch workspace; the PR gate protects the real repo).", { repo: z.string(), path: z.string(), content: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.writeFile(a.repo, a.path, a.content) }] })),
         tool("factory_run_checks", "Run the repo's OWN checks in the clone: npm test / npm run test|typecheck|build / npx tsc / npx tsx --test / git status|diff|log|add|commit|checkout.", { repo: z.string(), cmd: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.runChecks(a.repo, a.cmd) }] })),
         tool("factory_scan_diff", "Scan the clone's working diff for secrets before considering a PR.", { repo: z.string() }, async (a) => { const r = await deps.factory!.scanDiff(a.repo); return { content: [{ type: "text" as const, text: r.clean ? "diff clean: no secrets found" : `SECRETS FOUND: ${r.findings.join("; ")}` }] }; }),
+        tool("factory_screenshot", "Render evidence of the fix: runs the repo's own render command in the clone (e.g. `npm run report`), screenshots the HTML file it produced, shows you the image, and posts it to the conversation thread. Use it AFTER the fix to prove the corrected output; verify what you see in the image.", { repo: z.string(), cmd: z.string(), htmlPath: z.string(), title: z.string() }, async (a) => {
+          const r = await deps.factory!.screenshotEvidence(a.repo, a.cmd, a.htmlPath);
+          const { readFileSync } = await import("node:fs");
+          let posted = "not posted (no chat surface)";
+          if (deps.emitImage) { await deps.emitImage(r.path, a.title); posted = "posted to the thread"; }
+          deps.audit.write("image_out", { file: r.path, title: a.title, posted });
+          return { content: [{ type: "text" as const, text: `screenshot of ${a.htmlPath} after \`${a.cmd}\`: ${posted}` }, { type: "image" as const, data: readFileSync(r.path).toString("base64"), mimeType: "image/png" as const }] };
+        }),
+        tool("factory_serve", "Serve a directory of the factory clone on a local-only HTTP port so you can open it with browse_open and test the UI (static files only, 127.0.0.1). Returns the URL.", { repo: z.string(), subdir: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.serve(a.repo, a.subdir) }] })),
         tool("factory_create_pr", "MUTATING: commit the clone's changes, push the factory branch and open a DRAFT PR. Requires human approval; never merges, never pushes to main. Dry-run unless armed.", { repo: z.string(), title: z.string(), body: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.createPr(a.repo, a.title, a.body) }] }), { annotations: { destructiveHint: true } }),
       ]
     : [];
@@ -166,7 +177,12 @@ export function buildKitServer(deps: ToolsDeps) {
         tool("browse_type", "Type text into a field identified by its label.", { target: z.object({ text: z.string() }), text: z.string(), pressEnter: z.boolean().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.type(a.target, a.text, a.pressEnter) }] })),
         tool("browse_scroll", "Scroll the page.", { direction: z.enum(["up", "down"]) }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.scroll(a.direction) }] })),
         tool("browse_read", "Read the current page: URL, title, ARIA tree and text (untrusted content, wrapped).", {}, async () => ({ content: [{ type: "text" as const, text: await deps.browse!.read() }] })),
-        tool("browse_screenshot", "Take a screenshot of the current page and return it as an image you can see.", {}, async () => ({ content: [{ type: "image" as const, data: await deps.browse!.screenshotBase64(), mimeType: "image/png" as const }] })),
+        tool("browse_screenshot", "Take a screenshot of the current page and return it as an image you can see. Pass a title to ALSO post the screenshot to the conversation thread (use for before/after evidence).", { title: z.string().optional() }, async (a) => {
+          const f = await deps.browse!.screenshotFile();
+          const { readFileSync } = await import("node:fs");
+          if (a.title && deps.emitImage) { await deps.emitImage(f, a.title); deps.audit.write("image_out", { file: f, title: a.title, posted: "posted to the thread", via: "browse_screenshot" }); }
+          return { content: [{ type: "image" as const, data: readFileSync(f).toString("base64"), mimeType: "image/png" as const }] };
+        }),
         tool("browse_dismiss_popups", "Dismiss cookie banners / overlays blocking the page.", {}, async () => { const { dismissPopups } = await import("../../src/browse/actions.js"); return { content: [{ type: "text" as const, text: "popups dismissed" }] }; }),
       ]
     : [];

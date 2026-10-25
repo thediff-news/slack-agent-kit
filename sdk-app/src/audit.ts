@@ -11,7 +11,8 @@ export type AuditEvent = {
   ts: string;
   kind:
     | "message_in" | "message_out" | "tool_call" | "tool_result"
-    | "approval_requested" | "approval_resolved" | "turn_cost" | "error";
+    | "approval_requested" | "approval_resolved" | "turn_cost" | "error"
+    | "identity_denied" | "channel_denied" | "capability_denied" | "turn_cancelled" | "image_in" | "image_out";
   thread?: string;
   detail: Record<string, unknown>;
   prevHash: string;

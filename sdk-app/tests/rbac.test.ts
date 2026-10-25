@@ -186,7 +186,7 @@ test("roleAcls merge into retrieval tags; role-based approve counts, userAcls ne
     SDK_APP_RBAC_ROLES: '{"eng":["read","propose"],"chief":["read","propose","approve"]}',
     SDK_APP_RBAC_ROLE_ACLS: '{"eng":["engineering"]}',
   });
-  assert.deepEqual(config.aclTagsFor("U_EXTRA").sort(), ["engineering", "finance", "public"]);
+  assert.deepEqual(config.aclTagsFor("U_EXTRA")!.sort(), ["engineering", "finance", "public"]);
   assert.equal(config.isApprover("U_CHIEF"), true, "role with approve capability");
   assert.equal(config.isApprover("U_EXTRA"), false, "propose is not approve");
   const only = configFromEnv({ SDK_APP_USER_ACLS: '{"U_X":["engineering"]}' } as any);

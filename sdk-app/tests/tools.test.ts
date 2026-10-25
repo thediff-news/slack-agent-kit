@@ -64,7 +64,13 @@ test("kit MCP server builds with all three tools registered", () => {
 test("ARMED github_create_issue executes gh (controlled local fixture, no GitHub)", async () => {
   const { handlers } = setup(false); // SDK_APP_DRY_RUN=0
   const oldPath = process.env.PATH;
-  process.env.PATH = `/tmp/fake-bin:${oldPath}`;
+  // hermetic: build our own fake `gh` instead of relying on a pre-existing /tmp fixture
+  const { mkdtempSync: mk, writeFileSync: wf, chmodSync } = await import("node:fs");
+  const bin = mk(join(tmpdir(), "fake-bin-"));
+  wf("/tmp/fake-gh-calls.log", "");
+  wf(join(bin, "gh"), '#!/bin/sh\necho "$@" >> /tmp/fake-gh-calls.log\necho https://github.com/thediff-news/slack-agent-kit/issues/999\n');
+  chmodSync(join(bin, "gh"), 0o755);
+  process.env.PATH = `${bin}:${oldPath}`;
   try {
     const r = await handlers.createIssue({ repo: "o/r", title: "Armed test", body: "armed body" });
     assert.match(r.content[0].text, /Issue created: https:\/\/github.com\/thediff-news\/slack-agent-kit\/issues\/999/);

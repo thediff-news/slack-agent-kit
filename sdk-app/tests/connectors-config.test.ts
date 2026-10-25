@@ -13,7 +13,7 @@ test("web + slack-history build with creds; slack-history disabled without token
   const warns: string[] = [];
   const cs = buildConnectors(
     [{ type: "web", acl: "public" }, { type: "slack-history", channels: "C1,C2", acl: "engineering" }],
-    {}, names.length ? {} : {}, (m) => warns.push(m),
+    {}, { docsRoot: "docs", githubRepos: [] }, (m) => warns.push(m),
   );
   assert.deepEqual(names(cs), ["WebConnector"]);
   assert.match(warns[0], /SLACK_BOT_TOKEN missing/);

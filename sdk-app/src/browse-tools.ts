@@ -85,12 +85,17 @@ export class BrowseTools {
     return `URL: ${p.url()}\nTITLE: ${await p.title()}\nARIA:\n${wrapUntrusted(tree.detail)}\nTEXT:\n${wrapUntrusted(text.detail)}`;
   }
 
-  async screenshotBase64(): Promise<string> {
+  /** Screenshot the current page to a PNG file and return its path. */
+  async screenshotFile(): Promise<string> {
     const p = await this.page();
     const f = join(this.deps.downloadsDir ?? "/tmp/sdk-app-downloads", `shot-${Date.now()}.png`);
     await act.screenshot(p, f);
     this.deps.audit.write("tool_call", { tool: "browse_screenshot", url: p.url(), file: f });
-    return readFileSync(f).toString("base64");
+    return f;
+  }
+
+  async screenshotBase64(): Promise<string> {
+    return readFileSync(await this.screenshotFile()).toString("base64");
   }
 
   async close() {

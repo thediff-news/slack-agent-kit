@@ -7,6 +7,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
+import { dirname } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, normalize, resolve } from "node:path";
@@ -18,9 +19,13 @@ const run = promisify(execFile);
 /** Commands the agent may run inside the clone: the repo's own checks plus
  * read-only git and EXACT path-scoped index hygiene. No blanket destructive
  * git: no bare reset/restore, no `checkout -- <path>`, no `add -A/-u/.`. */
+/** `gh repo clone` leaves a plain https remote; git itself has no credentials.
+ * Push through gh as the credential helper so GH_TOKEN (or gh login) is used. */
+const GH_CRED = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+
 const SAFE_CMD = new RegExp(
   "^(" +
-    "npm (test|run (test|typecheck|build))" +
+    "npm (test|run (test|typecheck|build|report|render))" +
     "|npx (tsc|tsx --test\\b.*)" +
     "|git (status|diff|log|show)\\b[^\\n]*" +
     "|git add(?!.*\\s(-A|--all|-u))(?!.*\\s\\.(\\s|$)) -- [^\\n;|&]+" +
@@ -193,6 +198,63 @@ export class FactoryTools {
     }
   }
 
+  private servers = new Map<string, { url: string; server: import("node:http").Server }>();
+
+  /** Static, loopback-only file server over a clone directory, so the app's own
+   * browser tools can exercise a UI built from the clone (before and after a fix). */
+  async serve(repo: string, subdir = "."): Promise<string> {
+    const root = this.guardPath(repo, subdir);
+    const key = `${repo}|${root}`;
+    const have = this.servers.get(key);
+    if (have) return `serving ${subdir} of ${repo} at ${have.url} (already running)`;
+    const http = await import("node:http");
+    const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
+    const server = http.createServer((req, res) => {
+      try {
+        const u = decodeURIComponent((req.url ?? "/").split("?")[0]);
+        let f = resolve(root, "." + (u.endsWith("/") ? u + "index.html" : u));
+        if (!f.startsWith(root + "/") && f !== root) { res.writeHead(403).end("forbidden"); return; }
+        if (!existsSync(f)) { res.writeHead(404).end("not found"); return; }
+        const ext = f.slice(f.lastIndexOf("."));
+        res.writeHead(200, { "content-type": types[ext] ?? "text/plain", "cache-control": "no-store" }).end(readFileSync(f));
+      } catch { res.writeHead(500).end("error"); }
+    });
+    await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+    const url = `http://127.0.0.1:${(server.address() as any).port}/`;
+    this.servers.set(key, { url, server });
+    this.deps.audit.write("tool_call", { tool: "factory_serve", repo, subdir, url });
+    return `serving ${subdir} of ${repo} at ${url} (static, loopback only; reflects the clone's current files on each load)`;
+  }
+
+  async close(): Promise<void> {
+    for (const { server } of this.servers.values()) server.close();
+    this.servers.clear();
+  }
+
+  /** Evidence screenshot: run the repo's own render command in the clone, then
+   * render the produced HTML file with headless Chromium. Returns the PNG path
+   * (the caller shows the pixels to the model and posts them to the thread). */
+  async screenshotEvidence(repo: string, cmd: string, htmlPath: string): Promise<{ path: string; log: string }> {
+    const log = await this.runChecks(repo, cmd);
+    if (/^BLOCKED|^EXIT /.test(log)) throw new Error(`render command failed: ${log.slice(0, 400)}`);
+    const html = this.guardPath(repo, htmlPath);
+    if (!existsSync(html)) throw new Error(`${htmlPath} was not produced by \`${cmd}\``);
+    const outDir = join(dirname(this.deps.config.auditLog), "evidence");
+    mkdirSync(outDir, { recursive: true });
+    const path = join(outDir, `evidence-${Date.now()}.png`);
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
+      await page.goto(`file://${html}`);
+      await page.screenshot({ path, fullPage: true });
+    } finally {
+      await browser.close();
+    }
+    this.deps.audit.write("tool_call", { tool: "factory_screenshot", repo, cmd, html: htmlPath, file: path });
+    return { path, log };
+  }
+
   /** Scan the working diff for secrets (kit semantics: never PR a secret). */
   async scanDiff(repo: string): Promise<{ clean: boolean; findings: string[] }> {
     const dir = this.cloneDir(repo);
@@ -269,16 +331,16 @@ export class FactoryTools {
       const { stdout: staged } = await run("git", ["-C", dir, "diff", "--cached", "--name-only"]);
       if (staged.trim()) {
         await run("git", ["-C", dir, "commit", "-q", "-m", title]);
-        await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+        await run("git", ["-C", dir, ...GH_CRED, "push", "-q", "-u", "origin", branch]);
       } else if (hasCommitted) {
-        await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+        await run("git", ["-C", dir, ...GH_CRED, "push", "-q", "-u", "origin", branch]);
       }
     }
     if (existing) {
       this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: existing, idempotent: true });
       return `PR already open for ${branch}: ${existing} (no duplicate created).`;
     }
-    const { stdout } = await run("gh", ["pr", "create", "--repo", repo, "--title", title, "--body", body, "--draft"]);
+    const { stdout } = await run("gh", ["pr", "create", "--repo", repo, "--head", branch, "--title", title, "--body", body, "--draft"]);
     this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: stdout.trim() });
     return `PR created: ${stdout.trim()}`;
   }

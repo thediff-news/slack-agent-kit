@@ -108,7 +108,7 @@ test("multi-user same-thread isolation: unknown user identity-denied, enrolled u
     decisions[who] = await options.canUseTool(qualified("github_create_issue"), { repo: "o/r", title: "T", body: "b" });
     yield resultMsg();
   };
-  const agent = new AgentCore({ config, mcpServer, approvals, audit, queryFn: fakeQuery });
+  const agent = new AgentCore({ config, mcpServer, approvals, audit, queryFn: fakeQuery as any });
 
   // unknown user in the thread: identity-denied before capability or approval
   await (agent as any).chat("C1:1.1", "create issue", {}, { userId: "U0", surface: "slack" });

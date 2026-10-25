@@ -9,6 +9,38 @@
  * Approval replies in-thread: "approve <id>" / "deny <id>". */
 import { App } from "@slack/bolt";
 import { buildRuntime } from "./runtime.js";
+import type { InputImage } from "./agent.js";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
+
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGES = 3;
+
+/** Download image attachments of a Slack event with the bot token (needs the
+ * files:read scope). Only real image mimetypes, size-capped, host-checked:
+ * the bot token is only ever sent to files.slack.com. Exported for tests. */
+export async function fetchSlackImages(files: any[] | undefined, token: string, fetchFn: typeof fetch = fetch): Promise<{ images: InputImage[]; skipped: string[] }> {
+  const images: InputImage[] = [];
+  const skipped: string[] = [];
+  for (const f of files ?? []) {
+    const name = String(f?.name ?? f?.id ?? "file");
+    if (!IMAGE_TYPES.has(f?.mimetype)) { skipped.push(`${name}: not an image`); continue; }
+    if (images.length >= MAX_IMAGES) { skipped.push(`${name}: over the ${MAX_IMAGES}-image limit`); continue; }
+    const url = String(f?.url_private ?? "");
+    let host = "";
+    try { host = new URL(url).hostname; } catch { /* bad url */ }
+    if (host !== "files.slack.com") { skipped.push(`${name}: unexpected file host`); continue; }
+    if (Number(f?.size) > MAX_IMAGE_BYTES) { skipped.push(`${name}: larger than 5 MB`); continue; }
+    const r = await fetchFn(url, { headers: { Authorization: `Bearer ${token}` } });
+    const type = r.headers.get("content-type") ?? "";
+    if (!r.ok || !IMAGE_TYPES.has(type.split(";")[0])) { skipped.push(`${name}: download failed (HTTP ${r.status}${type.includes("html") ? ", missing files:read?" : ""})`); continue; }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > MAX_IMAGE_BYTES) { skipped.push(`${name}: larger than 5 MB`); continue; }
+    images.push({ mediaType: type.split(";")[0] as InputImage["mediaType"], data: buf.toString("base64"), name });
+  }
+  return { images, skipped };
+}
 
 /** Slack renders badly past ~4k chars; split long answers on paragraph, then
  * line, then hard boundaries. Exported for tests. */
@@ -50,12 +82,19 @@ export function renderError(err: unknown): string {
 }
 
 export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const { config, approvals, agent } = await buildRuntime(env);
+  const { config, approvals, agent, audit } = await buildRuntime(env);
 
   const bolt = new App({ token: env.SLACK_BOT_TOKEN, appToken: env.SLACK_APP_TOKEN, socketMode: true });
 
+  // A channel message that @mentions the bot arrives as BOTH message and
+  // app_mention: handle each Slack event timestamp once.
+  const seen = new Set<string>();
   const handle = async (event: any, say: any) => {
-    if (event.bot_id || event.subtype) return;
+    if (event.bot_id || (event.subtype && event.subtype !== "file_share")) return;
+    const dedupe = `${event.channel}:${event.ts}`;
+    if (seen.has(dedupe)) return;
+    seen.add(dedupe);
+    if (seen.size > 500) seen.delete(seen.values().next().value as string);
     const thread = event.thread_ts ?? event.ts;
     const threadKey = `${event.channel}:${thread}`;
     const text: string = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
@@ -68,7 +107,14 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
       await sayThread(n === 0 ? "Nothing is running in this thread." : n === 1 ? "Stopped the current turn." : `Stopped ${n} turns.`);
       return;
     }
-    if (!text) {
+    let images: InputImage[] = [];
+    if (event.files?.length) {
+      const got = await fetchSlackImages(event.files, String(env.SLACK_BOT_TOKEN)).catch((e) => ({ images: [] as InputImage[], skipped: [String(e?.message ?? e)] }));
+      images = got.images;
+      audit.write("image_in", { received: event.files.length, accepted: images.length, skipped: got.skipped }, threadKey);
+      if (got.skipped.length) await sayThread(`I could not read ${got.skipped.length} attachment(s): ${got.skipped.join("; ")}.`);
+    }
+    if (!text && !images.length) {
       await sayThread("Ask me something - I can search docs, browse approved sites, and work on the repo. Writes always ask first.");
       return;
     }
@@ -95,13 +141,20 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
       await agent.chat(threadKey, text, {
         onText: (t) => { void sayThread(t); },
         onApprovalNeeded: (id, summary) => { void sayThread(`Approval needed (${id}): ${summary}\nReply in thread: approve ${id} / deny ${id}`); },
-      }, { userId: event.user, surface: "slack", channelId: event.channel });
+      }, {
+        userId: event.user, surface: "slack", channelId: event.channel, images,
+        emitImage: async (path, title) => {
+          await bolt.client.filesUploadV2({ channel_id: event.channel, thread_ts: thread, file: readFileSync(path), filename: basename(path), title, initial_comment: title });
+        },
+      });
     } catch (err) {
       await sayThread(renderError(err));
     }
   };
 
-  bolt.event("app_mention", async ({ event, say }) => handle(event, say));
+  // app_mention can beat the matching message event, and only the message
+  // event carries file attachments reliably: give it a head start, then dedupe.
+  bolt.event("app_mention", async ({ event, say }) => { await new Promise((r) => setTimeout(r, 1500)); await handle(event, say); });
   bolt.message(async ({ event, say }) => handle(event, say));
 
   await bolt.start();
