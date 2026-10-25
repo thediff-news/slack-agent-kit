@@ -26,8 +26,8 @@ test("sandbox env keeps only SDK-required vars, drops other secrets", () => {
 
 test("wrapper arg parsing: defaults and explicit values", () => {
   const a = parseArgs(["--dir", ".", "--prompt-file", "p.txt", "--result-file", "r.json"]);
-  assert.equal(a.model, "claude-sonnet-5");
-  assert.equal(a.maxTurns, 30);
+  assert.equal(a.model, "claude-sonnet-5-5");
+  assert.equal(a.maxTurns, 8);
   const b = parseArgs(["--dir", ".", "--prompt-file", "p", "--result-file", "r", "--model", "claude-haiku-4.5", "--max-turns", "5"]);
   assert.equal(b.model, "claude-haiku-4.5");
   assert.equal(b.maxTurns, 5);

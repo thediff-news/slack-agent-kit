@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildSrtSettings } from "../src/factory/pipeline.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const srt = join(REPO_ROOT, "node_modules", ".bin", "srt");
@@ -27,15 +28,7 @@ writeFileSync(join(work, "workfile.txt"), "workdir-file-ok");
 const canary = join(homedir(), "srt-probe-canary.txt");
 writeFileSync(canary, "TOP-SECRET-CANARY");
 
-const settings = {
-  filesystem: {
-    denyRead: [homedir()],
-    allowRead: [work, join(REPO_ROOT, "node_modules")],
-    allowWrite: [work, tmpdir()],
-    denyWrite: [],
-  },
-  network: { allowedDomains: ["api.anthropic.com"], deniedDomains: [] },
-};
+const settings = buildSrtSettings(work);
 const settingsFile = join(work, "srt-settings.json");
 writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 
