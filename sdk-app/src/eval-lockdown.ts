@@ -53,8 +53,27 @@ export const EVAL_SAFE_CMD = new RegExp(
     "|grep\\b[^\\n;|&]*" +
     "|ls\\b[^\\n;|&]*" +
     "|cat [\\w./-]+" +
+    "|corepack pnpm install\\b[^\\n;|&]*" +
+    "|corepack pnpm (exec )?vitest run\\b[^\\n;|&]*" +
+    "|corepack pnpm run (test|test:unit|typecheck)\\b[^\\n;|&]*" +
   ")$",
 );
+
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+
+/** Warm package-manager caches bound into the sandbox so the agent can install
+ * deps OFFLINE from a fresh clone (eval blindness: no network inside). Only
+ * cache dirs - no credentials, no grader paths. Computed once at load. */
+const SANDBOX_EXTRA: { binds: string[]; env: string[] } = (() => {
+  const binds: string[] = [];
+  const env: string[] = [];
+  const store = process.env.PNPM_STORE_DIR ?? `${homedir()}/.local/share/pnpm/store`;
+  if (existsSync(store)) { binds.push("--ro-bind", store, "/opt/pnpm-store"); env.push("npm_config_store_dir=/opt/pnpm-store"); }
+  const corepack = `${homedir()}/.cache/node/corepack`;
+  if (existsSync(corepack)) { binds.push("--ro-bind", corepack, "/opt/corepack"); env.push("COREPACK_HOME=/opt/corepack"); }
+  return { binds, env };
+})();
 
 export type SandboxKind = "bwrap" | "unshare" | "none";
 
@@ -71,25 +90,50 @@ export function lockdownInvocation(cmd: string, cloneDir: string, kind: SandboxK
     "GIT_CONFIG_GLOBAL=/dev/null",
     "GH_TOKEN=", "GITHUB_TOKEN=", "GH_CONFIG_DIR=/dev/null",
   ];
-  if (kind === "bwrap") {
-    return {
-      file: "env",
-      args: [
-        ...env,
-        "bwrap",
-        "--unshare-net", "--die-with-parent", "--new-session",
-        "--ro-bind", "/usr", "/usr",
-        "--ro-bind", "/bin", "/bin",
-        "--ro-bind", "/lib", "/lib",
-        "--ro-bind", "/lib64", "/lib64",
-        "--ro-bind", "/etc", "/etc",
-        "--dev-bind", "/dev", "/dev",
-        "--tmpfs", "/tmp",
-        "--bind", cloneDir, cloneDir,
-        "--chdir", cloneDir,
-        "--", "sh", "-c", cmd,
-      ],
-    };
-  }
+  if (kind === "bwrap") return bwrapInvocation(cmd, cloneDir, false);
   return { file: "env", args: [...env, "unshare", "-Urn", "sh", "-c", cmd] };
+}
+
+/** Shared bwrap builder. net=false (checks): fresh netns, NO networking.
+ * net=true (app server): shares the host network so the app's local browser
+ * can reach the dev server on 127.0.0.1 - mounts/secrets stay isolated, but
+ * server-side egress is possible and the run is labeled NONBLIND for that
+ * component. */
+function bwrapInvocation(cmd: string, cloneDir: string, net: boolean): { file: string; args: string[] } {
+  const env = [
+    "-i",
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME=/tmp",
+    "LANG=C.UTF-8",
+    "GIT_TERMINAL_PROMPT=0",
+    "GIT_CONFIG_GLOBAL=/dev/null",
+    "GH_TOKEN=", "GITHUB_TOKEN=", "GH_CONFIG_DIR=/dev/null",
+    ...SANDBOX_EXTRA.env,
+  ];
+  return {
+    file: "env",
+    args: [
+      ...env,
+      "bwrap",
+      ...(net ? [] : ["--unshare-net"]),
+      "--die-with-parent", "--new-session",
+      "--ro-bind", "/usr", "/usr",
+      "--ro-bind", "/bin", "/bin",
+      "--ro-bind", "/lib", "/lib",
+      "--ro-bind", "/lib64", "/lib64",
+      "--ro-bind", "/etc", "/etc",
+      "--dev-bind", "/dev", "/dev",
+      "--tmpfs", "/tmp",
+      ...SANDBOX_EXTRA.binds,
+      "--bind", cloneDir, cloneDir,
+      "--chdir", cloneDir,
+      "--", "sh", "-c", cmd,
+    ],
+  };
+}
+
+/** App-server variant: mount/secret isolation identical to checks, host
+ * network shared (loopback reach for the local browser). NONBLIND label. */
+export function appServerInvocation(cmd: string, cloneDir: string): { file: string; args: string[] } {
+  return bwrapInvocation(cmd, cloneDir, true);
 }

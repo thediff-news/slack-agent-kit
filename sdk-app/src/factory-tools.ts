@@ -4,8 +4,8 @@
  * from the repo's own scripts, diffs are scanned for secrets, and creating
  * a PR is approval-gated + dry-run unless armed. Never merges, never
  * pushes to main. */
-import { execFile } from "node:child_process";
-import { checkEvalCommand, lockdownInvocation, EVAL_SAFE_CMD, type SandboxKind } from "./eval-lockdown.js";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { appServerInvocation, checkEvalCommand, lockdownInvocation, EVAL_SAFE_CMD, type SandboxKind } from "./eval-lockdown.js";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { dirname } from "node:path";
@@ -88,7 +88,7 @@ export type WorkflowState = {
   /** What made this a UI case: an image in the report demands the real browse
    * path (interaction + screenshot + assertion); "serve"/"render" may also use
    * the repo's own render command (factory_screenshot) as evidence. */
-  uiOrigin?: "image" | "serve" | "render";
+  uiOrigin?: "image" | "serve" | "render" | "dev-server";
 };
 
 export type FactoryDeps = {
@@ -434,9 +434,66 @@ export class FactoryTools {
     return `serving ${subdir} of ${repo} at ${url} (static, loopback only; reflects the clone's current files on each load)`;
   }
 
+
+  private appServers = new Map<string, { url: string; child: ChildProcess }>();
+
+  /** Start the clone's OWN dev server (package.json "dev" script, fixed
+   * template: corepack pnpm dev --host 127.0.0.1 --port N) inside the sandbox.
+   * Mount/secret isolation identical to run_checks; the server shares the host
+   * network so the app's local browser can reach it - the run is labeled
+   * NONBLIND for this component. Deps must already be installed offline
+   * (factory_run_checks: corepack pnpm install --offline). */
+  async startApp(repo: string, port?: number): Promise<string> {
+    const root = this.guardPath(repo, ".");
+    const key = `${repo}|app`;
+    const have = this.appServers.get(key);
+    if (have && have.child.exitCode === null) return `dev server already running at ${have.url}`;
+    const p = port ?? 5100 + Math.floor(Math.random() * 400);
+    const inv = appServerInvocation(`corepack pnpm dev --host 127.0.0.1 --port ${p}`, root);
+    const child = spawn(inv.file, inv.args, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let log = "";
+    child.stdout?.on("data", (d) => (log = (log + d).slice(-4000)));
+    child.stderr?.on("data", (d) => (log = (log + d).slice(-4000)));
+    const http = await import("node:http");
+    const deadline = Date.now() + 90_000;
+    const ok = await new Promise<boolean>((done) => {
+      const tick = () => {
+        const req = http.get(`http://127.0.0.1:${p}/`, (res) => { res.resume(); done(true); });
+        req.on("error", () => {
+          if (child.exitCode !== null || Date.now() > deadline) return done(false);
+          setTimeout(tick, 1000);
+        });
+      };
+      tick();
+    });
+    if (!ok) {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already dead */ }
+      this.deps.audit.write("tool_call", { tool: "factory_start_app", repo, port: p, ok: false });
+      return `APP FAILED TO START within 90s (exit ${child.exitCode ?? "?"}). Log tail:\n${log.slice(-2000)}`;
+    }
+    const url = `http://127.0.0.1:${p}/`;
+    this.appServers.set(key, { url, child });
+    const st = this.loadWf(repo);
+    if (!st.uiCase) { st.uiCase = true; st.uiOrigin = st.uiOrigin ?? "dev-server"; this.saveWf(repo, st); }
+    this.deps.audit.write("tool_call", { tool: "factory_start_app", repo, port: p, pid: child.pid });
+    return `dev server running at ${url} (pid ${child.pid}) - open it with browse_open and interact with browse_type/browse_click/browse_screenshot. Sandbox note: filesystem/secrets isolated; host network shared, so this run is labeled NONBLIND for the app-server component. Stop with factory_stop_app when done.`;
+  }
+
+  async stopApp(repo: string): Promise<string> {
+    const key = `${repo}|app`;
+    const have = this.appServers.get(key);
+    if (!have) return "no dev server running for this repo";
+    try { process.kill(-have.child.pid!, "SIGKILL"); } catch { /* already dead */ }
+    this.appServers.delete(key);
+    this.deps.audit.write("tool_call", { tool: "factory_stop_app", repo });
+    return "dev server stopped";
+  }
+
   async close(): Promise<void> {
     for (const { server } of this.servers.values()) server.close();
     this.servers.clear();
+    for (const { child } of this.appServers.values()) { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already dead */ } }
+    this.appServers.clear();
   }
 
   /** Evidence screenshot: run the repo's own render command in the clone, then
