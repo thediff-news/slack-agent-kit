@@ -6,7 +6,8 @@
  * pushes to main. */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join, normalize, resolve } from "node:path";
 import type { AppConfig } from "./config.js";
 import type { AuditLog } from "./audit.js";
@@ -49,8 +50,27 @@ export class FactoryTools {
     }
     const branch = `factory/sdk-${Date.now().toString(36)}`;
     await run("git", ["-C", dir, "checkout", "-q", "-B", branch]);
+    await this.setupToolchain(dir);
     this.deps.audit.write("tool_call", { tool: "factory_clone", repo, dir, branch, ref });
     return `cloned ${repo}${ref ? ` @ ${ref}` : ""} -> ${dir} on branch ${branch}`;
+  }
+
+  /** The clone must run the repo's own checks (`npx tsx --test ...`) without
+   * a global npm resolve: the global prefix is read-only here, so a bare
+   * `npx tsx` in a fresh clone dies with EACCES on npm-globals.lock. Reuse
+   * the app's own installed toolchain via a node_modules symlink, smoke-check
+   * it, and fall back to a clean `npm ci` when the symlink is unusable. */
+  private async setupToolchain(dir: string): Promise<void> {
+    const nm = join(dir, "node_modules");
+    if (existsSync(nm) || !existsSync(join(dir, "package.json"))) return;
+    const mainNm = fileURLToPath(new URL("../../node_modules", import.meta.url));
+    try {
+      symlinkSync(mainNm, nm, "dir");
+      await run("npx", ["--no-install", "tsx", "--version"], { cwd: dir });
+    } catch {
+      rmSync(nm, { force: true, recursive: true });
+      await run("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: dir });
+    }
   }
 
   private guardPath(repo: string, rel: string): string {

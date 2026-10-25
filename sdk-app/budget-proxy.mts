@@ -60,6 +60,42 @@ export function requestBoundUsd(inputTokens: number, maxOutputTokens: number, cf
   return (2 * inputTokens * COUNT_TOKENS_MARGIN * cfg.inputRatePerMTok + maxOutputTokens * cfg.outputRatePerMTok) / 1_000_000;
 }
 
+/** Usage parsed from a completed /v1/messages response (SSE stream or plain
+ *  JSON). Every cache class is counted at the highest input-side rate, so the
+ *  settled cost stays an upper bound. Null means no usage is visible; the full
+ *  reservation then stays charged (the safe direction). */
+export function extractUsage(body: string): { input: number; output: number } | null {
+  let input = 0, output = 0, seen = false;
+  if (/^event:/m.test(body)) {
+    for (const m of body.matchAll(/^data: (.*)$/gm)) {
+      try {
+        const d = JSON.parse(m[1]);
+        const u = d.type === "message_start" ? d.message?.usage : d.type === "message_delta" ? d.usage : undefined;
+        if (!u) continue;
+        if (d.type === "message_start") {
+          input += Number(u.input_tokens ?? 0) + Number(u.cache_creation_input_tokens ?? 0) + Number(u.cache_read_input_tokens ?? 0);
+          seen = true;
+        }
+        output = Math.max(output, Number(u.output_tokens ?? 0));
+      } catch { /* partial data line */ }
+    }
+    return seen ? { input, output } : null;
+  }
+  try {
+    const u = JSON.parse(body).usage;
+    if (!u) return null;
+    return { input: Number(u.input_tokens ?? 0) + Number(u.cache_creation_input_tokens ?? 0) + Number(u.cache_read_input_tokens ?? 0), output: Number(u.output_tokens ?? 0) };
+  } catch { return null; }
+}
+
+/** Post-response cost from MEASURED usage: same conservative rates as the
+ *  reservation (the count_tokens companion call is still priced as a second
+ *  input pass), but exact token counts replace the count padding and the
+ *  max_tokens ceiling. */
+export function settledCostUsd(u: { input: number; output: number }, cfg: Pick<ProxyConfig, "inputRatePerMTok" | "outputRatePerMTok">): number {
+  return (2 * u.input * cfg.inputRatePerMTok + u.output * cfg.outputRatePerMTok) / 1_000_000;
+}
+
 /** One upstream request, direct or CONNECT-tunneled through the srt proxy.
  *  Returns the raw response so SSE streams pass through untouched. */
 async function upstreamRaw(cfg: ProxyConfig, path: string, body: string, method = "POST"): Promise<{ status: number; headers: http.IncomingHttpHeaders; res: http.IncomingMessage }> {
@@ -217,6 +253,24 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       persist();
       const r = await upstreamRaw(cfg, url, JSON.stringify(body));
       clientRes.writeHead(r.status, r.headers);
+      // Tap the response for usage, then settle the reservation down to the
+      // measured cost when the stream ends. Settlement only ever LOWERS the
+      // ledger and only with usage evidence in hand; an unparseable or failed
+      // response keeps the full bound (safe direction).
+      const tap: Buffer[] = [];
+      let tapBytes = 0;
+      r.res.on("data", (c: Buffer) => { if (tapBytes < 8 * 1024 * 1024) { tap.push(c); tapBytes += c.length; } });
+      r.res.on("end", () => {
+        const usage = extractUsage(Buffer.concat(tap).toString("utf8"));
+        if (usage) {
+          const settled = settledCostUsd(usage, cfg);
+          if (settled < bound) {
+            cumulative = cumulative - bound + settled;
+            persist();
+            console.log(`[budget-proxy] ${new Date().toISOString()} settle req bound_usd=${bound.toFixed(6)} -> measured_bound_usd=${settled.toFixed(6)} (in=${usage.input} out=${usage.output}) cumulative_usd=${cumulative.toFixed(6)}`);
+          }
+        }
+      });
       r.res.pipe(clientRes); // SSE stream passes through untouched
     } catch (e) {
       console.log(`[budget-proxy] upstream error: ${(e as Error).stack ?? e}`);

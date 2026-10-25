@@ -60,3 +60,22 @@ test("secret scan catches keys in the diff; PR is dry-run and fixture-blocked", 
   assert.equal(scan.clean, false, "slack token in new content flagged");
   assert.match(await f.createPr(src, "t", "b"), /BLOCKED: PRs only for GitHub repos/);
 });
+
+test("clone gets a working toolchain: repo-local npx resolution inside the clone", async () => {
+  const src = mkdtempSync(join(tmpdir(), "fxrepo-"));
+  execFileSync("git", ["init", "-q", src]);
+  execFileSync("git", ["-C", src, "config", "user.email", "t@t"]);
+  execFileSync("git", ["-C", src, "config", "user.name", "t"]);
+  writeFileSync(join(src, "package.json"), JSON.stringify({ type: "module", scripts: { typecheck: "tsc --version" } }));
+  execFileSync("git", ["-C", src, "add", "-A"]);
+  execFileSync("git", ["-C", src, "commit", "-qm", "init"]);
+  const dir = mkdtempSync(join(tmpdir(), "fxstate-"));
+  const config = configFromEnv({ SDK_APP_AUDIT_LOG: join(dir, "audit.jsonl"), SDK_APP_GITHUB_REPOS: "thediff-news/slack-agent-kit" } as any);
+  const f = new FactoryTools({ config, audit: new AuditLog(config.auditLog) });
+  await f.clone(src);
+  // bare tsc (allowlisted) prints its version banner; it resolves from the same
+  // node_modules as tsx. `npx tsx --test` cannot be
+  // exercised here because node:test refuses to nest inside a running test run.
+  const out = await f.runChecks(src, "npm run typecheck");
+  assert.match(out, /Version \d+\.\d+/, `clone resolved the repo toolchain locally, got: ${out.slice(0, 300)}`);
+});
