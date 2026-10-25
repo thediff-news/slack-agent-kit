@@ -124,3 +124,21 @@ test("app server invocation: host net shared, mounts/secrets isolated, stores bo
   assert.ok(chk.args.includes("--unshare-net"), "checks still fully offline");
   assert.ok(chk.args.includes("/opt/pnpm-store"), "checks also see the store for pnpm install");
 });
+
+test("eval lockdown: fresh clones get NO node_modules toolchain symlink", async () => {
+  const { FactoryTools } = await import("../src/factory-tools.js");
+  const { configFromEnv } = await import("../src/config.js");
+  const { AuditLog } = await import("../src/audit.js");
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "lockdown-tc-"));
+  const config = configFromEnv({ SDK_APP_AUDIT_LOG: join(dir, "audit.jsonl"), SDK_APP_GITHUB_REPOS: "org/eval-repo", SDK_APP_EVAL_LOCKDOWN: "1" } as any);
+  const f = new FactoryTools({ config, audit: new AuditLog(join(dir, "audit.jsonl")) }) as any;
+  const fake = join(dir, "clone");
+  mkdirSync(fake);
+  writeFileSync(join(fake, "package.json"), "{}");
+  await f.setupToolchain.call({ deps: { config } }, fake); // direct: eval config must skip
+  const { existsSync, lstatSync } = await import("node:fs");
+  assert.ok(!existsSync(join(fake, "node_modules")) || !lstatSync(join(fake, "node_modules")).isSymbolicLink(), "no symlink under eval lockdown");
+});

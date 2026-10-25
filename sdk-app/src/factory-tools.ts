@@ -208,6 +208,10 @@ export class FactoryTools {
    * the app's own installed toolchain via a node_modules symlink, smoke-check
    * it, and fall back to a clean `npm ci` when the symlink is unusable. */
   private async setupToolchain(dir: string): Promise<void> {
+    // Eval lockdown: the agent owns dependency install from the fresh clone
+    // (offline store is bound into the sandbox). The toolchain symlink would
+    // both pre-solve setup and break foreign package managers (ENOTDIR).
+    if (this.deps.config.evalLockdown) return;
     const nm = join(dir, "node_modules");
     if (existsSync(nm) || !existsSync(join(dir, "package.json"))) return;
     const mainNm = fileURLToPath(new URL("../../node_modules", import.meta.url));
