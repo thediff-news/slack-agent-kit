@@ -17,7 +17,7 @@ export interface BrowserSessionOptions {
 }
 
 export class BrowserSession {
-  private browser?: Browser;
+  browser?: Browser;
   private context?: BrowserContext;
   private pages: Page[] = [];
   private active = 0;

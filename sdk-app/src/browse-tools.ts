@@ -38,14 +38,24 @@ export type BrowseDeps = { audit: AuditLog; policy: BrowsePolicy; downloadsDir?:
 
 export class BrowseTools {
   private session?: BrowserSession;
+  private crashed = false;
   constructor(private deps: BrowseDeps) {}
 
+  /** Dead sessions never recover (crashed tab, closed page, disconnected
+   * browser): relaunch once instead of failing every subsequent call. */
   private async page() {
-    if (!this.session) {
-      this.session = await BrowserSession.launch({ headless: true, downloadsDir: this.deps.downloadsDir ?? "/tmp/sdk-app-downloads" });
-      await this.session.newTab(); // launch() opens no tab on its own
+    if (this.session && !this.crashed) {
+      const p = this.session.page();
+      if (p && !p.isClosed() && (!this.session.browser || this.session.browser.isConnected())) return p;
     }
-    return this.session.page();
+    const relaunch = this.session !== undefined;
+    try { await this.session?.close(); } catch { /* already dead */ }
+    this.crashed = false;
+    this.session = await BrowserSession.launch({ headless: true, downloadsDir: this.deps.downloadsDir ?? "/tmp/sdk-app-downloads" });
+    const p = await this.session.newTab(); // launch() opens no tab on its own
+    p.on("crash", () => { this.crashed = true; });
+    if (relaunch) this.deps.audit.write("tool_call", { tool: "browse_relaunch", reason: "dead session" });
+    return p;
   }
 
   async open(url: string) {
