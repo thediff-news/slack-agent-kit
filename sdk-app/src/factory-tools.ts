@@ -9,13 +9,22 @@ import { appServerInvocation, checkEvalCommand, lockdownInvocation, EVAL_SAFE_CM
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { dirname } from "node:path";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, normalize, resolve } from "node:path";
 import type { AppConfig } from "./config.js";
 import type { AuditLog } from "./audit.js";
 
 const run = promisify(execFile);
+
+/** Ownership test for orphan sweeping: a process belongs to the clone's app
+ * tree when its cmdline references the clone path (bwrap/npm/vite wrappers)
+ * OR its working directory is inside the clone (bare `node server/server.js`
+ * has no path in cmdline). Both signals are clone-scoped, so test runners,
+ * the daemon, and other clones never match. */
+export function cloneOwnsProcess(root: string, cmdline: string, cwd: string): boolean {
+  return cmdline.includes(root) || (cwd !== "" && (cwd === root || cwd.startsWith(root + "/")));
+}
 
 /** Commands the agent may run inside the clone: the repo's own checks plus
  * read-only git and EXACT path-scoped index hygiene. No blanket destructive
@@ -439,6 +448,26 @@ export class FactoryTools {
   }
 
 
+  /** Orphan sweep: the process-group kill can miss re-grouped grandchildren
+   * (npm/concurrently wrappers), leaving stale servers bound to the app's
+   * ports after stop_app. Find and kill any remaining process whose cmdline
+   * references the clone root. Returns the number killed. */
+  sweepCloneProcesses(root: string): number {
+    let killed = 0;
+    let pids: string[] = [];
+    try { pids = readdirSync("/proc"); } catch { return 0; }
+    for (const pid of pids) {
+      if (!/^\d+$/.test(pid) || Number(pid) === process.pid) continue;
+      try {
+        const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        let cwd = "";
+        try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { /* gone */ }
+        if (cloneOwnsProcess(root, cmd, cwd)) { try { process.kill(Number(pid), "SIGKILL"); killed++; } catch { /* already gone */ } }
+      } catch { /* unreadable or gone */ }
+    }
+    return killed;
+  }
+
   private appServers = new Map<string, { url: string; child: ChildProcess }>();
 
   /** Generic README-derived launch support (replaces the fixed pnpm template):
@@ -479,6 +508,8 @@ export class FactoryTools {
     if (have && have.child.exitCode === null) return `app server already running at ${have.url}`;
     const launch = this.detectLaunch(root, script);
     if ("error" in launch) return `CANNOT DETERMINE LAUNCH COMMAND: ${launch.error}`;
+    const swept = this.sweepCloneProcesses(root);
+    if (swept > 0) await new Promise((r) => setTimeout(r, 1000));
     const inv = appServerInvocation(launch.cmd, root);
     const child = spawn(inv.file, inv.args, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let log = "";
@@ -516,13 +547,19 @@ export class FactoryTools {
   }
 
   async stopApp(repo: string): Promise<string> {
+    const root = this.guardPath(repo, ".");
     const key = `${repo}|app`;
     const have = this.appServers.get(key);
-    if (!have) return "no dev server running for this repo";
+    if (!have) {
+      const swept = this.sweepCloneProcesses(root);
+      return swept > 0 ? `no tracked dev server, but killed ${swept} orphaned process(es) still referencing the clone` : "no dev server running for this repo";
+    }
     try { process.kill(-have.child.pid!, "SIGKILL"); } catch { /* already dead */ }
+    await new Promise((r) => setTimeout(r, 1500));
+    const swept = this.sweepCloneProcesses(root);
     this.appServers.delete(key);
-    this.deps.audit.write("tool_call", { tool: "factory_stop_app", repo });
-    return "dev server stopped";
+    this.deps.audit.write("tool_call", { tool: "factory_stop_app", repo, orphansSwept: swept });
+    return swept > 0 ? `dev server stopped; also killed ${swept} orphaned descendant process(es) still referencing the clone` : "dev server stopped";
   }
 
   async close(): Promise<void> {

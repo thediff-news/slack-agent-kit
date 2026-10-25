@@ -178,3 +178,15 @@ test("detectLaunch: script override validated against package.json, no-script er
   const none = f.detectLaunch(src);
   assert.ok("error" in none && /no dev\/start script/.test(none.error));
 });
+
+
+test("cloneOwnsProcess: cmdline OR cwd inside the clone, nothing else", async () => {
+  const { cloneOwnsProcess } = await import("../src/factory-tools.js");
+  const root = "/tmp/run-x/state/factory-clones/org_repo";
+  assert.ok(cloneOwnsProcess(root, `node\0${root}/node_modules/.bin/vite\0`, "/"), "bwrap/npm wrapper by cmdline");
+  assert.ok(cloneOwnsProcess(root, "node\0server/server.js\0", root), "bare server process by cwd");
+  assert.ok(cloneOwnsProcess(root, "node\0server/server.js\0", root + "/server"), "nested cwd");
+  assert.ok(!cloneOwnsProcess(root, "node\0server/server.js\0", "/tmp/other-clone"), "other clone by cwd");
+  assert.ok(!cloneOwnsProcess(root, "tsx\0--test\0tests/factory.test.ts\0", "/tmp/sak/sdk-app"), "test runner self");
+  assert.ok(!cloneOwnsProcess(root, "", ""), "empty signals");
+});
