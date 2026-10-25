@@ -46,14 +46,20 @@ export interface ProxyConfig {
  *  provider-side by the max_tokens rewrite. */
 export const COUNT_TOKENS_MARGIN = 1.15;
 export function requestBoundUsd(inputTokens: number, maxOutputTokens: number, cfg: Pick<ProxyConfig, "inputRatePerMTok" | "outputRatePerMTok">): number {
-  return (inputTokens * COUNT_TOKENS_MARGIN * cfg.inputRatePerMTok + maxOutputTokens * cfg.outputRatePerMTok) / 1_000_000;
+  // Input is priced TWICE: once for the messages call and once for the upstream
+  // count_tokens call - the owning docs never state count_tokens is unbilled,
+  // so the bound assumes it bills at the same input rate. (If it is free the
+  // bound is simply more conservative; the ledger stays hard either way.)
+  return (2 * inputTokens * COUNT_TOKENS_MARGIN * cfg.inputRatePerMTok + maxOutputTokens * cfg.outputRatePerMTok) / 1_000_000;
 }
 
 /** One upstream request, direct or CONNECT-tunneled through the srt proxy.
  *  Returns the raw response so SSE streams pass through untouched. */
-async function upstreamRaw(cfg: ProxyConfig, path: string, body: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; res: http.IncomingMessage }> {
+async function upstreamRaw(cfg: ProxyConfig, path: string, body: string, method = "POST"): Promise<{ status: number; headers: http.IncomingHttpHeaders; res: http.IncomingMessage }> {
   const target = new URL(cfg.upstreamBase);
   const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || "";
+  const dbg = process.env.BUDGET_PROXY_DEBUG ? console.log : () => {};
+  dbg(`[budget-proxy] upstream ${path} target=${target.hostname} proxyEnv=${proxy ? "set" : "empty"}`);
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "x-api-key": cfg.realKey,
@@ -62,22 +68,41 @@ async function upstreamRaw(cfg: ProxyConfig, path: string, body: string): Promis
   };
   if (proxy && target.hostname.endsWith("anthropic.com")) {
     const p = new URL(proxy);
+    dbg(`[budget-proxy] CONNECT via ${p.hostname}:${p.port} user=${p.username.slice(0, 20)}...`);
     const auth = "Basic " + Buffer.from(`${decodeURIComponent(p.username)}:${decodeURIComponent(p.password)}`).toString("base64");
     const sock = net.connect(Number(p.port), p.hostname);
     await once(sock, "connect");
     sock.write(`CONNECT ${target.hostname}:443 HTTP/1.1\r\nHost: ${target.hostname}:443\r\nProxy-Authorization: ${auth}\r\n\r\n`);
-    sock.setEncoding("utf8");
-    let head = "";
+    // raw-buffer read: setEncoding/flowing-mode leftovers corrupt the TLS handshake
+    const headParts: Buffer[] = [];
     await new Promise<void>((resolve, reject) => {
-      const onData = (c: string) => { head += c; if (head.includes("\r\n\r\n")) { sock.off("data", onData); resolve(); } };
+      const timer = setTimeout(() => reject(new Error("CONNECT timeout")), 15_000);
+      const onData = (c: Buffer) => {
+        headParts.push(c);
+        const buf = Buffer.concat(headParts);
+        const end = buf.indexOf("\r\n\r\n");
+        if (end !== -1) {
+          clearTimeout(timer);
+          sock.off("data", onData);
+          sock.pause();
+          const rest = buf.subarray(end + 4);
+          if (rest.length) sock.unshift(rest); // hand surplus bytes back to TLS
+          resolve();
+        }
+      };
       sock.on("data", onData); sock.on("error", reject);
-      setTimeout(() => reject(new Error("CONNECT timeout")), 15_000);
     });
+    const head = Buffer.concat(headParts).toString("latin1");
     if (!head.startsWith("HTTP/1.1 200") && !head.startsWith("HTTP/1.0 200")) throw new Error(`proxy CONNECT failed: ${head.split("\r\n")[0]}`);
     const tlsSock = tls.connect({ socket: sock, servername: target.hostname });
-    await once(tlsSock, "secureConnect");
+    await Promise.race([once(tlsSock, "secureConnect"), new Promise((_, rej) => setTimeout(() => rej(new Error("TLS timeout")), 15_000))]);
+    // agent: false + request-level createConnection is IGNORED by Node 22 (the
+    // fresh agent's own createConnection runs and DNS-resolves the target,
+    // which fails inside the sandbox). Override the agent's createConnection.
+    const agent = new https.Agent();
+    agent.createConnection = (() => tlsSock) as typeof agent.createConnection;
     return new Promise((resolve, reject) => {
-      const req = https.request({ host: target.hostname, path, method: "POST", headers, agent: false, createConnection: () => tlsSock }, (res) => {
+      const req = https.request({ host: target.hostname, path, method, headers, agent }, (res) => {
         resolve({ status: res.statusCode ?? 0, headers: res.headers, res });
       });
       req.on("error", reject);
@@ -87,7 +112,7 @@ async function upstreamRaw(cfg: ProxyConfig, path: string, body: string): Promis
   }
   return new Promise((resolve, reject) => {
     const mod = target.protocol === "http:" ? http : https;
-    const req = mod.request({ host: target.hostname, port: target.port || undefined, path, method: "POST", headers }, (res) => {
+    const req = mod.request({ host: target.hostname, port: target.port || undefined, path, method, headers }, (res) => {
       resolve({ status: res.statusCode ?? 0, headers: res.headers, res });
     });
     req.on("error", reject);
@@ -113,7 +138,9 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       const url = clientReq.url ?? "/";
       if (clientReq.method !== "POST" || !url.startsWith("/v1/messages") || url === "/v1/messages/count_tokens") {
         // unbilled endpoints (models list, count_tokens): forward ungated
-        const r = await upstreamRaw(cfg, url, raw);
+        console.log(`[budget-proxy] ${new Date().toISOString()} passthrough ${clientReq.method} ${url}`);
+        const r = await upstreamRaw(cfg, url, raw, clientReq.method);
+        console.log(`[budget-proxy] ${new Date().toISOString()} passthrough ${clientReq.method} ${url} -> ${r.status}`);
         clientRes.writeHead(r.status, r.headers);
         r.res.pipe(clientRes);
         return;
@@ -134,7 +161,23 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       }
       body.max_tokens = Math.min(Number(body.max_tokens ?? cfg.maxOutputTokens) || cfg.maxOutputTokens, cfg.maxOutputTokens);
       // exact input count upstream (same tokenizer, unbilled)
-      const countBody = JSON.stringify({ model: body.model, messages: body.messages, ...(body.system ? { system: body.system } : {}), ...(body.tools ? { tools: body.tools } : {}), ...(body.thinking ? { thinking: body.thinking } : {}) });
+      // count_tokens rejects newer request fields (e.g. Sonnet 5.5 per-message
+      // output_config). Strip them recursively for the COUNT call only - the
+      // forwarded request keeps the original body. Divergence is covered by the
+      // 15% count padding; a failed count fails CLOSED (request rejected).
+      const stripForCount = (v: unknown): unknown => {
+        if (Array.isArray(v)) return v.map(stripForCount);
+        if (v && typeof v === "object") {
+          const o: Record<string, unknown> = {};
+          for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+            if (k === "output_config") continue;
+            o[k] = stripForCount(val);
+          }
+          return o;
+        }
+        return v;
+      };
+      const countBody = JSON.stringify({ model: body.model, messages: stripForCount(body.messages), ...(body.system ? { system: stripForCount(body.system) } : {}), ...(body.tools ? { tools: stripForCount(body.tools) } : {}), ...(body.thinking ? { thinking: body.thinking } : {}) });
       const cr = await upstreamJson(cfg, "/v1/messages/count_tokens", countBody);
       if (cr.status !== 200) {
         clientRes.writeHead(502, { "content-type": "application/json" });
@@ -142,7 +185,9 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
         return;
       }
       const inputTokens = Number(JSON.parse(cr.body).input_tokens ?? 0);
-      const bound = requestBoundUsd(inputTokens, body.max_tokens, cfg);
+      const boundExact = requestBoundUsd(inputTokens, body.max_tokens, cfg);
+      console.log(`[budget-proxy] ${new Date().toISOString()} gate req counted_input=${inputTokens} max_tokens=${body.max_tokens} bound_usd=${boundExact.toFixed(6)} cumulative_before_usd=${cumulative.toFixed(6)}`);
+      const bound = boundExact;
       if (cumulative + bound > cfg.totalUsd) {
         clientRes.writeHead(429, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_exceeded", message: `budget proxy hard cap: bound $${bound.toFixed(4)} would exceed cumulative cap $${cfg.totalUsd} (bound so far $${cumulative.toFixed(4)})` } }));
@@ -153,6 +198,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       clientRes.writeHead(r.status, r.headers);
       r.res.pipe(clientRes); // SSE stream passes through untouched
     } catch (e) {
+      console.log(`[budget-proxy] upstream error: ${(e as Error).stack ?? e}`);
       clientRes.writeHead(502, { "content-type": "application/json" });
       clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_error", message: (e as Error).message.slice(0, 300) } }));
     }

@@ -21,7 +21,7 @@ async function withMockUpstream(fn: (upstreamPort: number, seen: any[]) => Promi
 
 test("bound math: padded input at cache-write rate + capped output", () => {
   const b = requestBoundUsd(10_000, 8192, CFG);
-  assert.ok(Math.abs(b - ((10_000 * COUNT_TOKENS_MARGIN * 2.5) + 8192 * 10) / 1e6) < 1e-12);
+  assert.ok(Math.abs(b - ((2 * 10_000 * COUNT_TOKENS_MARGIN * 2.5) + 8192 * 10) / 1e6) < 1e-12);
 });
 
 test("proxy: max_tokens rewritten down, counted, forwarded under cap", async () => {
@@ -41,7 +41,7 @@ test("proxy: cumulative hard cap rejects without forwarding", async () => {
   await withMockUpstream(async (port, seen) => {
     const proxy = await startBudgetProxy({ ...CFG, upstreamBase: `http://127.0.0.1:${port}` });
     const one = () => fetch(`http://127.0.0.1:${proxy.port}/v1/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-5-5", messages: [{ role: "user", content: "hi" }] }) });
-    // bound per request = (10000*1.15*2.5 + 8192*10)/1e6 = 0.1106 > total 0.10 -> the FIRST call must already be refused
+    // bound per request = (2*10000*1.15*2.5 + 8192*10)/1e6 = 0.1394 > total 0.10 -> the FIRST call must already be refused
     const res = await one();
     assert.equal(res.status, 429);
     assert.equal(seen.filter((r) => r.url === "/v1/messages").length, 0, "never forwarded past cap");
