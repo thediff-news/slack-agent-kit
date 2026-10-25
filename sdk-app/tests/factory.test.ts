@@ -117,3 +117,32 @@ test("resolveRef: short SHA outside the shallow window resolves via gh api + dir
     process.env.PATH = oldPath;
   }
 });
+
+test("factory_serve: loopback only, path traversal blocked, subdir escape refused", async () => {
+  const { src, f } = await fixture();
+  await f.clone(src);
+  await f.writeFile(src, "index.html", "<h1>ok</h1>");
+  const msg = await f.serve(src);
+  const base = msg.match(/http:\/\/127\.0\.0\.1:\d+\//)![0];
+  try {
+    assert.equal((await fetch(base)).status, 200);
+    assert.equal((await fetch(base + "missing.txt")).status, 404);
+    // raw-socket request so the client cannot normalise the traversal away
+    const net = await import("node:net");
+    const port = Number(new URL(base).port);
+    const status = await new Promise<string>((ok) => {
+      const s = net.connect(port, "127.0.0.1", () => s.write("GET /..%2f..%2f..%2fetc/passwd HTTP/1.0\r\n\r\n"));
+      let buf = ""; s.on("data", (d) => (buf += d)); s.on("close", () => ok(buf.split("\r\n")[0]));
+    });
+    assert.match(status, / (403|404) /);
+    await assert.rejects(() => f.serve(src, "../.."), /escapes the clone/);
+  } finally { await f.close(); }
+});
+
+test("createPr source pins the head branch and scoped gh credential helper (static guard, live PR is the real proof)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const s = readFileSync(new URL("../src/factory-tools.ts", import.meta.url), "utf8");
+  assert.match(s, /"pr", "create", "--repo", repo, "--head", branch/);
+  assert.equal((s.match(/\.\.\.GH_CRED, "push"/g) ?? []).length, 2);
+  assert.doesNotMatch(s, /x-access-token|ghp_|https:\/\/[^\s"']*@github/);
+});
