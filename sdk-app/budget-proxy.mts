@@ -30,6 +30,7 @@ import net from "node:net";
 import tls from "node:tls";
 import { once } from "node:events";
 import { readFileSync, writeFileSync, renameSync, mkdirSync, appendFileSync } from "node:fs";
+import { buildMeterProjection, syncMeter } from "./src/checkpoint.js";
 import { dirname } from "node:path";
 
 export interface ProxyConfig {
@@ -62,6 +63,12 @@ export interface ProxyConfig {
    * classified (settled / unparseable / incomplete / rejected / aborted)
    * instead of sitting in the ledger as one unexplained number. */
   journalPath?: string;
+  /** Optional durable meter sync. When set, a request is forwarded upstream
+   * ONLY after the sanitized meter projection (request ids, bounds, states,
+   * meter totals - never bodies/headers/keys) is durably ACKed by the private
+   * remote; a sync failure FAILS CLOSED (503, reservation rolled back, nothing
+   * forwarded). Settle updates sync idempotently (full reconcile each time). */
+  checkpoint?: { stateDir: string; remote: string; branch?: string };
 }
 
 export type JournalEvent = {
@@ -69,7 +76,7 @@ export type JournalEvent = {
   reqId: string;
   ts: string;
   // gate
-  decision?: "accepted" | "rejected_cap" | "rejected_model" | "rejected_price" | "rejected_tool" | "rejected_count" | "rejected_badjson" | "rejected_queue_full" | "rejected_queue_timeout";
+  decision?: "accepted" | "rejected_cap" | "rejected_model" | "rejected_price" | "rejected_tool" | "rejected_count" | "rejected_badjson" | "rejected_queue_full" | "rejected_queue_timeout" | "rejected_durability" | "rejected_unmetered_endpoint";
   model?: string; counted_input?: number; max_tokens?: number; bound?: number; cumulative_after?: number;
   // upstream
   status?: number;
@@ -274,12 +281,27 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
   const journal = (e: Omit<JournalEvent, "ts">) => {
     if (!cfg.journalPath) return;
     try { appendFileSync(cfg.journalPath, JSON.stringify({ ...e, ts: new Date().toISOString() }) + "\n"); } catch { /* journal must never break the gate */ }
+    // Settle/unknown transitions update the durable projection idempotently
+    // (full reconcile each sync); a failed settle-sync heals on the next one.
+    if (e.ev === "settle" || e.ev === "upstream_error") void meterSync();
   };
   const persist = () => {
     if (!cfg.statePath) return;
     const tmp = cfg.statePath + ".tmp";
     writeFileSync(tmp, JSON.stringify({ cumulative, updated: new Date().toISOString() }));
     renameSync(tmp, cfg.statePath);
+  };
+
+  /** Durable meter sync: full reconcile from the journal every call (idempotent;
+   * a missed settle heals on the next transition). Returns the remote-ACK flag. */
+  const meterSync = async (): Promise<boolean> => {
+    if (!cfg.checkpoint) return true; // durability not configured: local journal only
+    try {
+      const events = cfg.journalPath ? readFileSync(cfg.journalPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+      const projection = buildMeterProjection(events, reconcileJournal, cumulative, basis);
+      const r = await syncMeter({ stateDir: cfg.checkpoint.stateDir, remote: cfg.checkpoint.remote, branch: cfg.checkpoint.branch, projection });
+      return r.ok && r.acked;
+    } catch { return false; }
   };
 
   // Backpressure: at most maxInflight reservations occupy upstream slots;
@@ -323,7 +345,20 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       if (typeof betaH === "string" && betaH) fwd["anthropic-beta"] = betaH;
       const verH = clientReq.headers["anthropic-version"];
       if (typeof verH === "string" && verH) fwd["anthropic-version"] = verH;
-      if (clientReq.method !== "POST" || !url.startsWith("/v1/messages") || url === "/v1/messages/count_tokens") {
+      const pathname = url.split("?")[0];
+      const isFreeEndpoint =
+        (clientReq.method === "POST" && pathname === "/v1/messages/count_tokens") || // documented free
+        (clientReq.method === "GET" && pathname === "/v1/models"); // unbilled metadata
+      if (!isFreeEndpoint && !(clientReq.method === "POST" && pathname === "/v1/messages")) {
+        // Never forward an endpoint the meter does not gate: an unmetered
+        // passthrough is a budget bypass, so anything outside the allowlist
+        // is refused instead of forwarded.
+        journal({ ev: "gate", reqId: `bp-${Date.now().toString(36)}-x`, decision: "rejected_unmetered_endpoint" });
+        clientRes.writeHead(403, { "content-type": "application/json" });
+        clientRes.end(JSON.stringify({ type: "error", error: { type: "unmetered_endpoint", message: "endpoint is not on the budget proxy allowlist and cannot be forwarded unmetered" } }));
+        return;
+      }
+      if (isFreeEndpoint) {
         // unbilled endpoints (models list, count_tokens): forward ungated
         console.log(`[budget-proxy] ${new Date().toISOString()} passthrough ${clientReq.method} ${url}`);
         const r = await upstreamRaw(cfg, url, raw, clientReq.method, fwd);
@@ -424,6 +459,21 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       cumulative += bound; // charged conservatively BEFORE forwarding; actual <= bound
       persist();
       journal({ ev: "gate", reqId, decision: "accepted", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound, cumulative_after: cumulative });
+      // Wallet-bearing moment: the reservation must be durable BEFORE upstream
+      // sees the request. FAIL CLOSED: no ACK, no forward, reservation rolled back.
+      if (!(await meterSync())) {
+        // Journal FIRST (synchronous, durable): a crash after this line but
+        // before the rollback leaves the ledger holding the bound while the
+        // journal says provable-zero - the safe direction (overcharged, never
+        // undercharged). The reverse order could lose money across a restart.
+        journal({ ev: "gate", reqId, decision: "rejected_durability", model: String(body.model ?? ""), bound });
+        cumulative -= bound;
+        persist();
+        releaseSlot();
+        clientRes.writeHead(503, { "content-type": "application/json" });
+        clientRes.end(JSON.stringify({ type: "error", error: { type: "durability_unavailable", message: "meter checkpoint remote ACK failed; the request was NOT forwarded and the reservation was rolled back" } }));
+        return;
+      }
       let r: Awaited<ReturnType<typeof upstreamRaw>>;
       try {
         r = await upstreamRaw(cfg, url, JSON.stringify(body), "POST", fwd);

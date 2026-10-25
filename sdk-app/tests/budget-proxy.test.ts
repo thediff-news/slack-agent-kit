@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import zlib from "node:zlib";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
@@ -78,6 +79,97 @@ const settle = () => new Promise((r) => setTimeout(r, 50));
 // free - verified in the owning docs) *1.15 padding *2.5/M + 4096 max out *10/M
 const perReq = (1000 * 1.15 * 2.5 + 4096 * 10) / 1e6; // = 0.043835
 const msg = { model: "claude-sonnet-5-5", messages: [{ role: "user", content: "hi" }], max_tokens: 4096 };
+
+
+
+test("meter: non-allowlisted endpoints are refused, never forwarded unmetered; count_tokens stays free", async () => {
+  const up = await mockUpstream();
+  const dir = mkdtempSync(join(tmpdir(), "proxy-allow-"));
+  const p = await startBudgetProxy(cfg(up.port, { journalPath: join(dir, "j.jsonl"), checkpoint: { stateDir: join(dir, "s"), remote: "file:///nonexistent/never.git" } }));
+  // billed-shaped endpoint the meter does not gate: refused, upstream not hit
+  const r1 = await post(p.port, "/v1/complete", msg);
+  assert.equal(r1.status, 403);
+  assert.match(r1.body, /unmetered_endpoint/);
+  // documented-free count_tokens: passthrough even with the durability remote dead
+  const r2 = await post(p.port, "/v1/messages/count_tokens", msg);
+  assert.equal(r2.status, 200);
+  p.close(); up.close();
+});
+
+test("durability crash consistency: rejected_durability is provable-zero across restart; unsettled unknowns stay held", async () => {
+  const up = await mockUpstream();
+  const dir = mkdtempSync(join(tmpdir(), "proxy-crash-"));
+  const journalPath = join(dir, "j.jsonl");
+  const statePath = join(dir, "ledger.json");
+  const dead = { stateDir: join(dir, "s"), remote: "file:///nonexistent/never.git" };
+  // request refused pre-forward; journal written before rollback (crash-safe order)
+  const p1 = await startBudgetProxy(cfg(up.port, { statePath, journalPath, checkpoint: dead }));
+  const r = await post(p1.port, "/v1/messages", msg);
+  assert.equal(r.status, 503);
+  p1.close();
+  // restart: journal + ledger agree the reservation is provably zero
+  const events = readFileSync(journalPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const rec = reconcileJournal(events);
+  assert.equal(rec.totals.provableZero, 1);
+  assert.equal(rec.totals.unknownCount, 0);
+  assert.equal(rec.totals.heldBound, 0);
+  const p2 = await startBudgetProxy(cfg(up.port, { statePath, journalPath, checkpoint: dead }));
+  assert.equal(p2.spentBoundUsd(), 0);
+  p2.close();
+  // an accepted-but-never-settled request (the crash-mid-flight shape) is an
+  // unknown: held at bound, NEVER rolled back
+  const rec2 = reconcileJournal([{ ev: "gate", reqId: "bp-x", decision: "accepted", bound: 0.05 } as any]);
+  assert.equal(rec2.totals.unknownCount, 1);
+  assert.ok(Math.abs(rec2.totals.heldBound - 0.05) < 1e-12);
+  up.close();
+});
+
+test("durability: no remote ACK -> NOT forwarded, reservation rolled back, 503", async () => {
+  const up = await mockUpstream();
+  const dir = mkdtempSync(join(tmpdir(), "proxy-dur-"));
+  const journalPath = join(dir, "journal.jsonl");
+  const p = await startBudgetProxy(cfg(up.port, { journalPath, checkpoint: { stateDir: join(dir, "state"), remote: "file:///nonexistent/never.git" } }));
+  const r = await post(p.port, "/v1/messages", msg);
+  assert.equal(r.status, 503);
+  assert.match(r.body, /durability_unavailable/);
+  assert.equal(p.spentBoundUsd(), 0); // rolled back, not charged
+  const jl = readFileSync(journalPath, "utf8");
+  assert.match(jl, /rejected_durability/);
+  assert.doesNotMatch(jl, /"ev":"upstream"/); // never forwarded
+  p.close(); up.close();
+});
+
+test("durability: settle updates the meter projection idempotently, no secrets/bodies in it", async () => {
+  const up = await mockUpstream();
+  const dir = mkdtempSync(join(tmpdir(), "proxy-mtr-"));
+  const journalPath = join(dir, "journal.jsonl");
+  const remote = join(dir, "remote.git");
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  const stateDir = join(dir, "state");
+  const p = await startBudgetProxy(cfg(up.port, { journalPath, checkpoint: { stateDir, remote } }));
+  const r = await post(p.port, "/v1/messages", msg);
+  assert.equal(r.status, 200);
+  // wait for the settle-triggered projection sync (async, best-effort)
+  let proj = "";
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r2) => setTimeout(r2, 100));
+    try { proj = readFileSync(join(stateDir, "checkpoints", "meter-latest.json"), "utf8"); if (proj.includes("settled_measured")) break; } catch { }
+  }
+  assert.match(proj, /settled_measured/);
+  assert.match(proj, /"cumulative":/);
+  assert.match(proj, /unknownCount/);
+  assert.doesNotMatch(proj, /test-key/); // never the API key
+  assert.doesNotMatch(proj, /"hi"/);     // never prompt content
+  // idempotent: a second sync of the same projection is a no-op (no new commit)
+  const head1 = execFileSync("git", ["--git-dir", remote, "rev-parse", "auto-checkpoints"], { encoding: "utf8" });
+  const { syncMeter, buildMeterProjection } = await import("../src/checkpoint.js");
+  const { reconcileJournal: rec } = await import("../budget-proxy.mjs");
+  const events = readFileSync(journalPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  await syncMeter({ stateDir, remote, projection: buildMeterProjection(events, rec as never, 0, 0) });
+  const head2 = execFileSync("git", ["--git-dir", remote, "rev-parse", "auto-checkpoints"], { encoding: "utf8" });
+  assert.equal(head2, head1);
+  p.close(); up.close();
+});
 
 test("budget proxy: durable ledger survives restart and basis counts against the cap", async () => {
   const up = await mockUpstream();

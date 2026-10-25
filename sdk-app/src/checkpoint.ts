@@ -130,3 +130,44 @@ export async function requireDurable(opts: CaptureOpts & { remote: string; branc
   if (!cap.ok) return { ok: false, acked: false, error: `capture refused: ${(cap.refused ?? []).join("; ")}` };
   return syncCheckpoints(opts);
 }
+
+/** Sanitized meter projection: per-request ID/bound/state/measured plus
+ * reconciled totals. NEVER contains request/response bodies, headers, keys,
+ * or prompt fragments - only the wallet-relevant meter state. */
+export type MeterProjection = {
+  version: 1;
+  at: string;
+  cumulative: number;
+  basis: number;
+  totals: { acceptedBound: number; settledMeasured: number; released: number; heldBound: number; provableZero: number; unknownCount: number };
+  requests: Record<string, { state: string; bound: number; measured?: number }>;
+};
+
+export function buildMeterProjection(events: { ev: string; reqId: string; bound?: number; measured?: number; parsed?: boolean; complete?: boolean; decision?: string }[], reconcile: (ev: never[]) => { requests: Record<string, { state: string; bound: number; measured?: number }>; totals: MeterProjection["totals"] }, cumulative: number, basis: number): MeterProjection {
+  const { requests: reservations, totals } = reconcile(events as never[]);
+  const requests: MeterProjection["requests"] = {};
+  for (const [id, r] of Object.entries(reservations)) requests[id] = { state: r.state, bound: r.bound, ...(r.measured !== undefined ? { measured: r.measured } : {}) };
+  return { version: 1, at: new Date().toISOString(), cumulative, basis, totals, requests };
+}
+
+/** Idempotent meter sync: one fixed-name projection file (full reconcile
+ * every time, so a missed settle sync heals on the next transition), pushed
+ * through the same ACK-gated remote sync as worktree checkpoints. */
+export async function syncMeter(opts: { stateDir: string; remote: string; branch?: string; projection: MeterProjection }): Promise<{ ok: boolean; acked: boolean; error?: string }> {
+  const dir = join(opts.stateDir, "checkpoints");
+  mkdirSync(dir, { recursive: true });
+  const target = join(dir, "meter-latest.json");
+  // Idempotency: `at` is volatile, so a fresh projection of an unchanged meter
+  // must reuse the existing timestamp; otherwise every sync writes new bytes
+  // and forces a new checkpoint commit for zero information.
+  let projection = opts.projection;
+  try {
+    const prior: MeterProjection = JSON.parse(readFileSync(target, "utf8"));
+    const { at: _a, ...priorRest } = prior;
+    const { at: _b, ...nextRest } = projection;
+    if (JSON.stringify(priorRest) === JSON.stringify(nextRest)) projection = { ...projection, at: prior.at };
+  } catch { /* no readable prior: fresh write */ }
+  writeFileSync(target + ".tmp", JSON.stringify(projection, null, 1));
+  renameSync(target + ".tmp", target);
+  return syncCheckpoints({ stateDir: opts.stateDir, remote: opts.remote, branch: opts.branch ?? "auto-checkpoints", author: { name: "sdk-app-checkpoint", email: "checkpoint@localhost" } });
+}
