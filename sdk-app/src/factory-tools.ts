@@ -6,7 +6,7 @@
  * pushes to main. */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, normalize, resolve } from "node:path";
 import type { AppConfig } from "./config.js";
@@ -66,6 +66,10 @@ export class FactoryTools {
     const mainNm = fileURLToPath(new URL("../../node_modules", import.meta.url));
     try {
       symlinkSync(mainNm, nm, "dir");
+      // a symlink is not a directory to git's exclude matching: "node_modules/"
+      // in .gitignore does NOT match the symlink, so scan_diff's git add -N -A
+      // would sweep the toolchain into the PR diff. Exclude it locally.
+      appendFileSync(join(dir, ".git", "info", "exclude"), "\nnode_modules\n");
       await run("npx", ["--no-install", "tsx", "--version"], { cwd: dir });
     } catch {
       rmSync(nm, { force: true, recursive: true });

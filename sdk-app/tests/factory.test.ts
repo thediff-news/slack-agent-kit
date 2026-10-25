@@ -78,4 +78,6 @@ test("clone gets a working toolchain: repo-local npx resolution inside the clone
   // exercised here because node:test refuses to nest inside a running test run.
   const out = await f.runChecks(src, "npm run typecheck");
   assert.match(out, /Version \d+\.\d+/, `clone resolved the repo toolchain locally, got: ${out.slice(0, 300)}`);
+  const st = await f.runChecks(src, "git status");
+  assert.ok(!/^.. node_modules$/m.test(st), `symlinked toolchain must not enter the git diff: ${st.slice(0, 200)}`);
 });
