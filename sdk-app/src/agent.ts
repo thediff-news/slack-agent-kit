@@ -77,6 +77,8 @@ export class AgentCore {
     // browser or write capabilities. Unknown Slack users get public docs only.
     const operator = ctx.surface !== "slack";
     const known = operator || config.isKnownIdentity(ctx.userId);
+    const caps = config.capsFor(ctx.userId, operator);
+    const chanPolicy = ctx.channelId ? config.rbac.channels[ctx.channelId] : undefined;
     audit.write("message_in", { text: userText.slice(0, 500), user: ctx.userId ?? "operator", known }, threadKey);
 
     const canUseTool = async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
@@ -86,6 +88,19 @@ export class AgentCore {
           audit.write("identity_denied", { tool: short, user: ctx.userId ?? "unknown" }, threadKey);
           return { behavior: "deny", message: "Your identity is not enrolled in this app; factory, browser and write capabilities stay locked until an admin enrolls you. You can search public docs." };
         }
+      }
+      // Channel allowlist (kit RBAC): a channel with a policy admits only
+      // listed tools ("*" = all). No policy = no channel restriction.
+      const shortName = toolName.startsWith(`mcp__${SERVER_NAME}__`) ? toolName.slice(`mcp__${SERVER_NAME}__`.length) : toolName;
+      if (chanPolicy && !chanPolicy.allow.includes("*") && !chanPolicy.allow.includes(shortName)) {
+        audit.write("channel_denied", { tool: shortName, channel: ctx.channelId }, threadKey);
+        return { behavior: "deny", message: `Tool ${shortName} is not allowed in this channel.` };
+      }
+      // Capability tier: sync/factory/browse/mutating need "propose".
+      const needsPropose = shortName === "sync_docs" || shortName.startsWith("factory_") || shortName.startsWith("browse_") || (MUTATING_TOOLS as readonly string[]).includes(shortName);
+      if (needsPropose && !caps.includes("propose")) {
+        audit.write("capability_denied", { tool: shortName, user: ctx.userId ?? "operator" }, threadKey);
+        return { behavior: "deny", message: `Your role lacks the 'propose' capability needed for ${shortName}.` };
       }
       // Browse guardrails (kit semantics): out-of-allowlist hosts and
       // irreversible clicks need a human; host approvals persist.
@@ -138,7 +153,11 @@ export class AgentCore {
       mcpServers: { [SERVER_NAME]: mcpServer },
       // Unknown identities: only the public-doc read tools are pre-allowed;
       // everything else routes through canUseTool, which denies it above.
-      allowedTools: (known ? [...READ_TOOLS] : config.publicSync ? ["search_docs", "get_doc", "sync_docs"] : ["search_docs", "get_doc"]).map(qualified),
+      allowedTools: (known ? READ_TOOLS.filter((t) => {
+        if (chanPolicy && !chanPolicy.allow.includes("*") && !chanPolicy.allow.includes(t)) return false;
+        const np = t === "sync_docs" || t.startsWith("factory_") || t.startsWith("browse_");
+        return !np || caps.includes("propose");
+      }) : config.publicSync ? ["search_docs", "get_doc", "sync_docs"] : ["search_docs", "get_doc"]).map(qualified),
       tools: [], // no built-in CLI tools; the agent only gets the kit MCP server
       canUseTool,
       permissionMode: "default",

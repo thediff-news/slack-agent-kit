@@ -39,7 +39,7 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     await agent.chat(threadKey, text, {
       onText: (t) => { void sayThread(t); },
       onApprovalNeeded: (id, summary) => { void sayThread(`Approval needed (${id}): ${summary}\nReply in thread: approve ${id} / deny ${id}`); },
-    }, { userId: event.user, surface: "slack" });
+    }, { userId: event.user, surface: "slack", channelId: event.channel });
   };
 
   bolt.event("app_mention", async ({ event, say }) => handle(event, say));

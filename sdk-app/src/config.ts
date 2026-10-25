@@ -1,4 +1,6 @@
 /** SDK-native app configuration. All env-driven; no secrets in code. */
+export type Capability = "read" | "propose" | "execute" | "approve";
+
 export type AppConfig = {
   /** Model the SDK loop runs on. */
   model: string;
@@ -35,6 +37,21 @@ export type AppConfig = {
   /** Explicit opt-in: let UNENROLLED users run sync_docs (index rebuild).
    * Default false: sync mutates the index and discloses existence counts. */
   publicSync: boolean;
+  /** Roles/capabilities model ported from the kit's core/permissions.ts.
+   * users maps Slack user ID -> ONE role (default "viewer"); roles maps role
+   * -> capabilities ("read"|"propose"|"execute"|"approve"); roleAcls adds RAG
+   * tags per role; channels maps channel ID -> tool allowlist ("*" = all).
+   * Env: SDK_APP_RBAC_USERS / SDK_APP_RBAC_ROLES / SDK_APP_RBAC_ROLE_ACLS /
+   * SDK_APP_CHANNEL_POLICIES, all JSON. Missing maps fail closed. */
+  rbac: {
+    users: Record<string, string>;
+    roles: Record<string, Capability[]>;
+    roleAcls: Record<string, string[]>;
+    channels: Record<string, { allow: string[] }>;
+  };
+  /** Capability set for a requester. Unknown users still get "read" (public
+   * docs only); operator surfaces are unrestricted. */
+  capsFor(userId: string | undefined, operator: boolean): Capability[];
 };
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -44,6 +61,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
   } catch {
     userAcls = {}; // fail closed: a broken map grants nothing
   }
+  const j = (raw?: string): any => { try { return JSON.parse(raw || "{}") } catch { return {}; } };
   const cfg: AppConfig = {
     model: env.SDK_APP_MODEL || "claude-sonnet-5-5",
     docsRoot: env.SDK_APP_DOCS_ROOT || "docs",
@@ -61,17 +79,31 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
       ...(env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL } : {}),
     },
     aclTagsFor(userId?: string) {
-      const extra = (userId && userAcls[userId]) || [];
+      const role = (userId && cfg.rbac.users[userId]) || "viewer";
+      const extra = [...((userId && userAcls[userId]) || []), ...(cfg.rbac.roleAcls[role] || [])];
       if (extra.includes("*")) return undefined; // unfiltered
       return [...new Set(["public", ...extra])];
+    },
+    capsFor(userId, operator) {
+      if (operator) return ["read", "propose", "execute", "approve"];
+      const role = (userId && cfg.rbac.users[userId]) || "viewer";
+      return [...new Set<Capability>(["read", ...(cfg.rbac.roles[role] || [])])];
     },
     isKnownIdentity(userId?: string) {
       return Boolean(userId && (userAcls[userId] !== undefined || cfg.approvers.includes(userId)));
     },
     isApprover(userId?: string) {
-      return Boolean(userId) && cfg.approvers.includes(userId!);
+      // approvers list OR an explicit "approve" capability via role - the
+      // per-user ACL map (userAcls) never grants approval authority.
+      return Boolean(userId) && (cfg.approvers.includes(userId!) || cfg.capsFor(userId, false).includes("approve"));
     },
     publicSync: env.SDK_APP_PUBLIC_SYNC === "1",
+    rbac: {
+      users: j(env.SDK_APP_RBAC_USERS),
+      roles: j(env.SDK_APP_RBAC_ROLES),
+      roleAcls: j(env.SDK_APP_RBAC_ROLE_ACLS),
+      channels: j(env.SDK_APP_CHANNEL_POLICIES),
+    },
   };
   return cfg;
 }

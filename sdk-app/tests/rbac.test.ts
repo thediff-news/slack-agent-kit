@@ -79,7 +79,7 @@ test("get_doc direct bypass: restricted id is denied for public requester", asyn
 });
 
 test("agent gate: unknown slack identity denied factory/browse/write, allowed public reads; enrolled not identity-denied", async () => {
-  const { config, audit, approvals } = mk({ SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}' });
+  const { config, audit, approvals } = mk({ SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}', SDK_APP_RBAC_USERS: '{"U_ENG":"eng"}', SDK_APP_RBAC_ROLES: '{"eng":["read","propose"]}' });
   let captured: any;
   const fakeQuery = (({ options }: any) => {
     captured = options;
@@ -115,7 +115,7 @@ test("sync_docs: unknown identity denied by default; publicSync=1 opens it; enro
   assert.equal(d.behavior, "deny");
   assert.deepEqual(captured.allowedTools, ["mcp__kit__search_docs", "mcp__kit__get_doc"]);
   // enrolled identity keeps sync
-  const mk2 = mk({ SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}' });
+  const mk2 = mk({ SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}', SDK_APP_RBAC_USERS: '{"U_ENG":"eng"}', SDK_APP_RBAC_ROLES: '{"eng":["read","propose"]}' });
   let cap2: any;
   const fq2 = (({ options }: any) => { cap2 = options; return (async function* () { yield { type: "result", subtype: "success", session_id: "s" }; })(); }) as any;
   const agent2 = new AgentCore({ config: mk2.config, approvals: mk2.approvals, audit: mk2.audit, queryFn: fq2, mcpServerFactory: () => ({}) as any });
@@ -130,4 +130,65 @@ test("no role collapse: ACL enrollment grants identity but never approver author
   assert.equal(config.isApprover("U_ADMIN"), true);
   assert.equal(config.isApprover("U_RANDOM"), false);
   assert.equal(config.isApprover(undefined), false);
+});
+
+test("channel policy: unlisted tool denied in that channel, fine elsewhere; '*' admits all", async () => {
+  const { config, audit, approvals } = mk({
+    SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}',
+    SDK_APP_CHANNEL_POLICIES: '{"C_LOCKED":{"allow":["search_docs","get_doc"]}}',
+  });
+  let captured: any;
+  const fakeQuery = (({ options }: any) => { captured = options; return (async function* () { yield { type: "result", subtype: "success", session_id: "s" }; })(); }) as any;
+  const agent = new AgentCore({ config, approvals, audit, queryFn: fakeQuery, mcpServerFactory: () => ({}) as any });
+  await agent.chat("C_LOCKED:1", "hi", {}, { userId: "U_ENG", surface: "slack", channelId: "C_LOCKED" });
+  const gate = captured.canUseTool;
+  assert.equal((await gate("mcp__kit__factory_clone", {})).behavior, "deny", "factory denied in locked channel");
+  assert.match((await gate("mcp__kit__factory_clone", {})).message, /not allowed in this channel/);
+  assert.equal((await gate("mcp__kit__search_docs", { query: "x" })).behavior, "allow");
+  assert.ok(!captured.allowedTools.includes("mcp__kit__factory_clone"), "locked-channel tools not pre-allowed");
+  // same user, other channel: no policy -> factory passes channel+cap tiers
+  await agent.chat("C_OPEN:1", "hi", {}, { userId: "U_ENG", surface: "slack", channelId: "C_OPEN" });
+  const d = await captured.canUseTool("mcp__kit__factory_clone", {});
+  assert.equal(/not allowed in this channel/.test(d.message ?? ""), false);
+});
+
+test("capability tier: viewer (read-only) denied factory/browse/sync; propose role passes the tier", async () => {
+  const { config, audit, approvals } = mk({
+    SDK_APP_RBAC_USERS: '{"U_VIEW":"viewer","U_ENG":"eng"}',
+    SDK_APP_RBAC_ROLES: '{"viewer":["read"],"eng":["read","propose"]}',
+  });
+  let captured: any;
+  const fakeQuery = (({ options }: any) => { captured = options; return (async function* () { yield { type: "result", subtype: "success", session_id: "s" }; })(); }) as any;
+  const agent = new AgentCore({ config, approvals, audit, queryFn: fakeQuery, mcpServerFactory: () => ({}) as any });
+  // U_VIEW is enrolled via RBAC users map? isKnownIdentity checks userAcls/approvers - add to ACL map too
+  const { config: c2, audit: a2, approvals: p2 } = mk({
+    SDK_APP_USER_ACLS: '{"U_VIEW":[],"U_ENG":[]}',
+    SDK_APP_RBAC_USERS: '{"U_VIEW":"viewer","U_ENG":"eng"}',
+    SDK_APP_RBAC_ROLES: '{"viewer":["read"],"eng":["read","propose"]}',
+  });
+  const agent2 = new AgentCore({ config: c2, approvals: p2, audit: a2, queryFn: fakeQuery, mcpServerFactory: () => ({}) as any });
+  await agent2.chat("t1", "hi", {}, { userId: "U_VIEW", surface: "slack", channelId: "C1" });
+  for (const t of ["factory_clone", "browse_read", "sync_docs"]) {
+    const d = await captured.canUseTool(`mcp__kit__${t}`, {});
+    assert.equal(d.behavior, "deny", `${t} denied for read-only role`);
+    assert.match(d.message, /lacks the 'propose' capability/);
+  }
+  assert.equal((await captured.canUseTool("mcp__kit__search_docs", {})).behavior, "allow");
+  await agent2.chat("t2", "hi", {}, { userId: "U_ENG", surface: "slack", channelId: "C1" });
+  const d = await captured.canUseTool("mcp__kit__factory_clone", {});
+  assert.equal(/lacks the 'propose' capability/.test(d.message ?? ""), false, "propose role passes the tier");
+});
+
+test("roleAcls merge into retrieval tags; role-based approve counts, userAcls never does", () => {
+  const { config } = mk({
+    SDK_APP_USER_ACLS: '{"U_EXTRA":["finance"]}',
+    SDK_APP_RBAC_USERS: '{"U_EXTRA":"eng","U_CHIEF":"chief"}',
+    SDK_APP_RBAC_ROLES: '{"eng":["read","propose"],"chief":["read","propose","approve"]}',
+    SDK_APP_RBAC_ROLE_ACLS: '{"eng":["engineering"]}',
+  });
+  assert.deepEqual(config.aclTagsFor("U_EXTRA").sort(), ["engineering", "finance", "public"]);
+  assert.equal(config.isApprover("U_CHIEF"), true, "role with approve capability");
+  assert.equal(config.isApprover("U_EXTRA"), false, "propose is not approve");
+  const only = configFromEnv({ SDK_APP_USER_ACLS: '{"U_X":["engineering"]}' } as any);
+  assert.equal(only.isApprover("U_X"), false, "ACL-map-only user is never an approver");
 });
