@@ -406,8 +406,18 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
         else if (/deflate/i.test(enc)) zlib.inflate(raw, done);
         else finish(raw, false);
       };
-      r.res.on("end", () => trySettle("end"));
-      r.res.on("close", () => trySettle("close"));
+      let sawEnd = false;
+      r.res.on("end", () => { sawEnd = true; trySettle("end"); });
+      r.res.on("close", () => {
+        trySettle("close");
+        if (!sawEnd) {
+          // Premature upstream close: pipe() only ends the client on "end", so
+          // a cut stream (tunnel drop, network wobble) would leave the SDK
+          // waiting on a dead response forever. Propagate the cut so the
+          // client's own error/retry handling fires.
+          clientRes.destroy(new Error("upstream closed before end-of-stream"));
+        }
+      });
       r.res.pipe(clientRes); // SSE stream passes through untouched
     } catch (e) {
       console.log(`[budget-proxy] upstream error: ${(e as Error).stack ?? e}`);

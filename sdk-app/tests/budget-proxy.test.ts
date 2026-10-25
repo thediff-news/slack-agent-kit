@@ -300,3 +300,35 @@ test("journal: truncated SSE and unparseable response classify as kept-bound unk
   assert.equal(rec2.totals.unknownCount, 1);
   p2.close(); up2.close();
 });
+
+test("budget proxy: premature upstream close terminates the client instead of hanging", async () => {
+  // upstream writes partial SSE then destroys the socket without end-of-stream
+  const server = http.createServer((req, res) => {
+    if (req.url === "/v1/messages/count_tokens") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: 1000 }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write("event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 100, output_tokens: 1 } } }) + "\n\n");
+    setTimeout(() => res.socket.destroy(), 50); // tunnel-drop style cut
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const up = { port: (server.address() as any).port, close: () => server.close() };
+  const p = await startBudgetProxy(cfg(up.port));
+  const outcome = await new Promise<string>((resolve) => {
+    const r = http.request({ host: "127.0.0.1", port: p.port, path: "/v1/messages", method: "POST" }, (resp) => {
+      resp.resume();
+      resp.on("end", () => resolve("ended"));
+      resp.on("close", () => resolve("closed"));
+      resp.on("error", () => resolve("error"));
+    });
+    r.on("error", () => resolve("error"));
+    r.end(JSON.stringify(msg));
+    setTimeout(() => resolve("HUNG"), 3000);
+  });
+  assert.notEqual(outcome, "HUNG", "client must be terminated on premature upstream close, not left hanging");
+  await settle();
+  p.close(); up.close();
+});
