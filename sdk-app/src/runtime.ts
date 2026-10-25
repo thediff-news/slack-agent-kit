@@ -9,6 +9,7 @@ import { buildKitServer } from "./tools.js";
 import { AgentCore, type QueryFn } from "./agent.js";
 import { openRagStore } from "./rag-store.js";
 import { BrowsePolicy, BrowseTools } from "./browse-tools.js";
+import { FactoryTools } from "./factory-tools.js";
 import { FilesystemConnector } from "../../src/connectors/fs.js";
 import { GitHubConnector } from "../../src/connectors/github.js";
 
@@ -26,7 +27,8 @@ export async function buildRuntime(env: NodeJS.ProcessEnv = process.env, queryFn
   }
   const browsePolicy = new BrowsePolicy(config.auditLog.replace(/[^/]+$/, "browse-allowlist.json"), config.browseAllowlist);
   const browse = new BrowseTools({ audit, policy: browsePolicy });
-  const mcpServer = buildKitServer({ connectors, config, audit, ragStore, browse });
+  const factory = new FactoryTools({ config, audit });
+  const mcpServer = buildKitServer({ connectors, config, audit, ragStore, browse, factory });
   const agent = new AgentCore({ config, mcpServer, approvals, audit, queryFn, browsePolicy });
   const close = async () => { await browse.close(); ragStore.rag.close(); };
   return { config, audit, approvals, agent, ragStore, browsePolicy, close };

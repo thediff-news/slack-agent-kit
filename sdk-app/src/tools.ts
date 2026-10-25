@@ -7,14 +7,15 @@ import type { AppConfig } from "./config.js";
 import type { AuditLog } from "./audit.js";
 import type { RagStore } from "./rag-store.js";
 import type { BrowseTools } from "./browse-tools.js";
+import type { FactoryTools } from "./factory-tools.js";
 
 const run = promisify(execFile);
 
 /** Names of the in-process tools the agent loop can call. Read tools are
  * auto-allowed; mutating tools go through the approval gate (agent.ts). */
-export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups"] as const;
+export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups", "factory_clone", "factory_read_file", "factory_list_files", "factory_write_file", "factory_run_checks", "factory_scan_diff"] as const;
 export const BROWSE_GATED_TOOLS = ["browse_open", "browse_click", "browse_type"] as const;
-export const MUTATING_TOOLS = ["github_create_issue"] as const;
+export const MUTATING_TOOLS = ["github_create_issue", "factory_create_pr"] as const;
 export const SERVER_NAME = "kit";
 export const qualified = (n: string) => `mcp__${SERVER_NAME}__${n}`;
 
@@ -24,6 +25,7 @@ export type ToolsDeps = {
   audit: AuditLog;
   ragStore?: RagStore;
   browse?: BrowseTools;
+  factory?: FactoryTools;
 };
 
 /** The kit's capabilities, exposed to the Claude Agent SDK loop as an
@@ -122,6 +124,18 @@ export function buildKitServer(deps: ToolsDeps) {
     { annotations: { destructiveHint: true } },
   );
 
+  const factoryTools = deps.factory
+    ? [
+        tool("factory_clone", "Clone an allowlisted repo (or local fixture path) into an isolated factory workspace and start a factory/* branch.", { repo: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.clone(a.repo) }] })),
+        tool("factory_list_files", "List files in the factory clone.", { repo: z.string(), subdir: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.listFiles(a.repo, a.subdir) }] })),
+        tool("factory_read_file", "Read a file inside the factory clone.", { repo: z.string(), path: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.readFile(a.repo, a.path) }] })),
+        tool("factory_write_file", "Write a file inside the factory clone (scratch workspace; the PR gate protects the real repo).", { repo: z.string(), path: z.string(), content: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.writeFile(a.repo, a.path, a.content) }] })),
+        tool("factory_run_checks", "Run the repo's OWN checks in the clone: npm test / npm run test|typecheck|build / npx tsc / npx tsx --test / git status|diff|log|add|commit|checkout.", { repo: z.string(), cmd: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.runChecks(a.repo, a.cmd) }] })),
+        tool("factory_scan_diff", "Scan the clone's working diff for secrets before considering a PR.", { repo: z.string() }, async (a) => { const r = await deps.factory!.scanDiff(a.repo); return { content: [{ type: "text" as const, text: r.clean ? "diff clean: no secrets found" : `SECRETS FOUND: ${r.findings.join("; ")}` }] }; }),
+        tool("factory_create_pr", "MUTATING: commit the clone's changes, push the factory branch and open a DRAFT PR. Requires human approval; never merges, never pushes to main. Dry-run unless armed.", { repo: z.string(), title: z.string(), body: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.createPr(a.repo, a.title, a.body) }] }), { annotations: { destructiveHint: true } }),
+      ]
+    : [];
+
   const browseTools = deps.browse
     ? [
         tool("browse_open", "Navigate the browser to a URL. Out-of-allowlist hosts require human approval.", { url: z.string().url() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.open(a.url) }] })),
@@ -134,5 +148,5 @@ export function buildKitServer(deps: ToolsDeps) {
       ]
     : [];
 
-  return createSdkMcpServer({ name: SERVER_NAME, version: "0.1.0", tools: [searchDocs, getDoc, syncDocs, createIssue, ...browseTools] });
+  return createSdkMcpServer({ name: SERVER_NAME, version: "0.1.0", tools: [searchDocs, getDoc, syncDocs, createIssue, ...factoryTools, ...browseTools] });
 }
