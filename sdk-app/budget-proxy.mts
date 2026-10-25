@@ -65,36 +65,49 @@ export function requestBoundUsd(inputTokens: number, maxOutputTokens: number, cf
  *  JSON). Every cache class is counted at the highest input-side rate, so the
  *  settled cost stays an upper bound. Null means no usage is visible; the full
  *  reservation then stays charged (the safe direction). */
-export function extractUsage(body: string): { input: number; output: number } | null {
-  let input = 0, output = 0, seen = false;
+export type MeasuredUsage = { input: number; cacheWrite: number; cacheRead: number; output: number };
+
+const usageOf = (u: any): MeasuredUsage => ({
+  input: Number(u.input_tokens ?? 0),
+  cacheWrite: Number(u.cache_creation_input_tokens ?? 0),
+  cacheRead: Number(u.cache_read_input_tokens ?? 0),
+  output: Number(u.output_tokens ?? 0),
+});
+
+export function extractUsage(body: string): MeasuredUsage | null {
+  let acc: MeasuredUsage = { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 };
+  let seen = false;
   if (/^event:/m.test(body)) {
     for (const m of body.matchAll(/^data: (.*)$/gm)) {
       try {
         const d = JSON.parse(m[1]);
         const u = d.type === "message_start" ? d.message?.usage : d.type === "message_delta" ? d.usage : undefined;
         if (!u) continue;
+        const mu = usageOf(u);
         if (d.type === "message_start") {
-          input += Number(u.input_tokens ?? 0) + Number(u.cache_creation_input_tokens ?? 0) + Number(u.cache_read_input_tokens ?? 0);
+          acc = { input: acc.input + mu.input, cacheWrite: acc.cacheWrite + mu.cacheWrite, cacheRead: acc.cacheRead + mu.cacheRead, output: acc.output };
           seen = true;
         }
-        output = Math.max(output, Number(u.output_tokens ?? 0));
+        acc.output = Math.max(acc.output, mu.output);
       } catch { /* partial data line */ }
     }
-    return seen ? { input, output } : null;
+    return seen ? acc : null;
   }
   try {
     const u = JSON.parse(body).usage;
     if (!u) return null;
-    return { input: Number(u.input_tokens ?? 0) + Number(u.cache_creation_input_tokens ?? 0) + Number(u.cache_read_input_tokens ?? 0), output: Number(u.output_tokens ?? 0) };
+    return usageOf(u);
   } catch { return null; }
 }
 
-/** Post-response cost from MEASURED usage: same conservative rates as the
- *  reservation (the count_tokens companion call is still priced as a second
- *  input pass), but exact token counts replace the count padding and the
- *  max_tokens ceiling. */
-export function settledCostUsd(u: { input: number; output: number }, cfg: Pick<ProxyConfig, "inputRatePerMTok" | "outputRatePerMTok">): number {
-  return (2 * u.input * cfg.inputRatePerMTok + u.output * cfg.outputRatePerMTok) / 1_000_000;
+/** Post-response cost from MEASURED usage at EXACT per-class rates on the
+ *  proxy's configured schedule: plain input 1x, cache write 1.25x, cache read
+ *  0.1x (the API's universal cache pricing multipliers), output 1x. The old
+ *  model charged every class at 2x full input rate (a "count_tokens companion"
+ *  that is actually unbilled), inflating settled cost several-fold on
+ *  cache-heavy traffic and stranding real budget as fictitious bound spend. */
+export function settledCostUsd(u: MeasuredUsage, cfg: Pick<ProxyConfig, "inputRatePerMTok" | "outputRatePerMTok">): number {
+  return ((u.input + 1.25 * u.cacheWrite + 0.1 * u.cacheRead) * cfg.inputRatePerMTok + u.output * cfg.outputRatePerMTok) / 1_000_000;
 }
 
 /** One upstream request, direct or CONNECT-tunneled through the srt proxy.
@@ -281,7 +294,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
           if (settled < bound) {
             cumulative = cumulative - bound + settled;
             persist();
-            console.log(`[budget-proxy] ${new Date().toISOString()} settle req bound_usd=${bound.toFixed(6)} -> measured_bound_usd=${settled.toFixed(6)} (in=${usage.input} out=${usage.output}) cumulative_usd=${cumulative.toFixed(6)}`);
+            console.log(`[budget-proxy] ${new Date().toISOString()} settle req bound_usd=${bound.toFixed(6)} -> measured_bound_usd=${settled.toFixed(6)} (in=${usage.input} cw=${usage.cacheWrite} cr=${usage.cacheRead} out=${usage.output}) cumulative_usd=${cumulative.toFixed(6)}`);
           }
         };
         const enc = String(r.headers["content-encoding"] ?? "");
