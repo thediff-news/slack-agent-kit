@@ -27,6 +27,9 @@ export type AppConfig = {
   /** Slack user ID -> RAG ACL tags (SDK_APP_USER_ACLS JSON, e.g. {"U123":["engineering"]}).
    * Unknown users get ["public"]; a user tagged "*" sees everything. */
   userAcls: Record<string, string[]>;
+  /** Connector settings (SDK_APP_CONNECTORS JSON array). Empty = legacy
+   * default: filesystem docsRoot + github repos. */
+  connectors: import("./connectors.js").ConnectorCfg[];
   /** Retrieval ACL tags for a requester: undefined = unfiltered (operator/"*"). */
   aclTagsFor(userId?: string): string[] | undefined;
   /** A requester we can bind to a configured identity (ACL entry or named approver). */
@@ -98,6 +101,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
       return Boolean(userId) && (cfg.approvers.includes(userId!) || cfg.capsFor(userId, false).includes("approve"));
     },
     publicSync: env.SDK_APP_PUBLIC_SYNC === "1",
+    connectors: (() => { try { return JSON.parse(env.SDK_APP_CONNECTORS || "[]") } catch { return []; } })(),
     rbac: {
       users: j(env.SDK_APP_RBAC_USERS),
       roles: j(env.SDK_APP_RBAC_ROLES),

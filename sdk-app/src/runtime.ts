@@ -10,16 +10,14 @@ import { AgentCore, type QueryFn } from "./agent.js";
 import { openRagStore } from "./rag-store.js";
 import { BrowsePolicy, BrowseTools } from "./browse-tools.js";
 import { FactoryTools } from "./factory-tools.js";
-import { FilesystemConnector } from "../../src/connectors/fs.js";
-import { GitHubConnector } from "../../src/connectors/github.js";
+import { buildConnectors } from "./connectors.js";
 
 export async function buildRuntime(env: NodeJS.ProcessEnv = process.env, queryFn?: QueryFn) {
   const config = configFromEnv(env);
   mkdirSync(dirname(config.auditLog), { recursive: true });
   const audit = new AuditLog(config.auditLog);
   const approvals = new ApprovalStore(config.approvalsLog);
-  const connectors = [new FilesystemConnector(config.docsRoot)];
-  if (config.githubRepos.length) connectors.push(new GitHubConnector(config.githubRepos) as any);
+  const connectors = buildConnectors(config.connectors, env, { docsRoot: config.docsRoot, githubRepos: config.githubRepos });
   const ragStore = openRagStore(config.ragDb);
   // first-boot index so search_docs is ranked from the start; refresh via sync_docs
   if (ragStore.rag.count() === 0) {
