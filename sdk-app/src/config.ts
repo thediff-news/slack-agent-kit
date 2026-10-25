@@ -133,3 +133,19 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
   };
   return cfg;
 }
+
+/** EVAL-context startup preflight: returns every missing required setting as a
+ * human-readable problem (empty = OK). Silent defaults have silently disabled
+ * enrollment/allowlists before; run-slack fails fast on any problem when
+ * SDK_APP_EVAL_LOCKDOWN=1. */
+export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): string[] {
+  const problems: string[] = [];
+  if (!c.evalLockdown) problems.push("SDK_APP_EVAL_LOCKDOWN is not '1'");
+  if (c.githubRepos.length === 0) problems.push("SDK_APP_GITHUB_REPOS is empty (agent cannot clone the case repo)");
+  if (c.approvers.length === 0) problems.push("SDK_APP_APPROVERS is empty (nobody can approve)");
+  if (Object.keys(c.userAcls).length === 0) problems.push("SDK_APP_USER_ACLS is empty (no enrolled identity; agent is locked out of factory/browser)");
+  if (c.dryRun) problems.push("SDK_APP_DRY_RUN is not 0 (writes would be simulated)");
+  if (!process.env.SDK_APP_PROXY_CAP_USD) problems.push("SDK_APP_PROXY_CAP_USD unset (budget cap would silently default)");
+  if (!process.env.SDK_APP_PROXY_STATE) problems.push("SDK_APP_PROXY_STATE unset (spend ledger not durable)");
+  return problems;
+}
