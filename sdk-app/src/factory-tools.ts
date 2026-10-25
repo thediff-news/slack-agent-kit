@@ -89,6 +89,12 @@ export type WorkflowState = {
   reproUi?: UiEvidence;
   reproInteract?: UiEvidence;
   greenRun?: { cmd: string; at: string; tree: string };
+  /** Explicit partial-verification record (operator-authorized, DRAFT-only):
+   * substitutes for a fully-green run only where parts of the suite cannot
+   * run in this environment. Binds base + tree + compared evidence; the PR
+   * body must declare it via the PARTIAL VERIFICATION marker. Never affects
+   * merge (PRs are drafts here) and never waives compared-failure parity. */
+  partialReview?: { baseSha: string; tree: string; policy: string; compared: string[]; regression: string; browserGrade: string; unrun: string[]; authorizedBy: string; at: string };
   afterUi?: UiEvidence;
   /** The model's reasoned read of the UI, independently re-checked by the app
    * against the live page (or the rendered HTML) at record time. */
@@ -747,9 +753,17 @@ export class FactoryTools {
         }
       }
       if (!(wf.greenRun && wf.greenRun.tree === currentTree)) {
-        problems.push(wf.greenRun
-          ? "the passing test run is STALE: files changed since; re-run the full tests on the final diff"
-          : "no passing test run recorded (factory_run_checks: npm test on the final diff)");
+        const pr = wf.partialReview;
+        const prValid = pr && pr.policy === "explicit-partial-verification" && pr.tree === currentTree && pr.baseSha === wf.baseSha;
+        if (prValid && body.includes("PARTIAL VERIFICATION")) {
+          this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, partialReviewAccepted: true, tree: currentTree.slice(0, 12), unrun: pr.unrun });
+        } else if (prValid) {
+          problems.push("partial-verification review record is present, but the PR body does not declare it: include the marker 'PARTIAL VERIFICATION' and the unrun-coverage caveats in the PR body");
+        } else {
+          problems.push(wf.greenRun
+            ? "the passing test run is STALE: files changed since; re-run the full tests on the final diff"
+            : "no passing test run recorded (factory_run_checks: npm test on the final diff)");
+        }
       }
       if (problems.length) {
         this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, refused: "workflow-incomplete", problems });

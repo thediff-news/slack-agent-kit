@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FactoryTools } from "../src/factory-tools.js";
@@ -65,6 +65,26 @@ test("createPr: approval binds the exact diff - a changed branch invalidates it"
   await tools.__seedWorkflowForTests("owner/name");
   const ok = await tools.createPr("owner/name", "t", "b");
   assert.match(ok, /DIFF HASH/);
+});
+
+
+test("createPr: explicit partial-verification record admits a DRAFT plan only with the body marker, bound to base+tree", async () => {
+  const { tools, dir } = fixtureClone(false);
+  await tools.__seedWorkflowForTests("owner/name");
+  const wfPath = join(dir, "..", "..", "factory-workflow", "owner_name.json");
+  const wf = JSON.parse(readFileSync(wfPath, "utf8"));
+  const rec = { baseSha: wf.baseSha, tree: wf.greenRun.tree, policy: "explicit-partial-verification", compared: ["mqtt 7=7 identical IDs"], regression: "RED base 3/3, GREEN fix 3/3", browserGrade: "45/45 real beats carry .down", unrun: ["e2e", "docker suites"], authorizedBy: "test", at: new Date().toISOString() };
+  delete wf.greenRun;
+  wf.partialReview = rec;
+  writeFileSync(wfPath, JSON.stringify(wf));
+  const refusedNoMarker = await tools.createPr("owner/name", "t", "b");
+  assert.match(refusedNoMarker, /PARTIAL VERIFICATION/);
+  const ok = await tools.createPr("owner/name", "t", "PARTIAL VERIFICATION: caveats listed");
+  assert.match(ok, /DIFF HASH|would push/);
+  wf.partialReview.tree = "deadbeefdeadbeef";
+  writeFileSync(wfPath, JSON.stringify(wf));
+  const refusedStale = await tools.createPr("owner/name", "t", "PARTIAL VERIFICATION: caveats");
+  assert.match(refusedStale, /no passing test run recorded/);
 });
 
 test("factory_run allowlist: exact path-scoped index hygiene, no blanket destructive git", async () => {
