@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, SDKMessage, PermissionResult, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { pickModel, type AppConfig } from "./config.js";
@@ -62,7 +62,7 @@ Bug reports (text and/or screenshots): triage BEFORE you touch code. The factory
 1. Look at any attached image carefully and quote the numbers/labels you read from it.
 2. Investigate with several sources: search_docs/get_doc (design docs, policies, issues), the repo code (factory_clone, factory_read_file, factory_list_files), and history (git log/show via factory_run_checks). A reporter's explanation of the cause is a hypothesis, not a fact.
 3. For a web UI report (any report about a web page, and any report with a UI screenshot): reproduce the broken behavior in the browser BEFORE any source edit - factory_serve the clone, browse_open the returned 127.0.0.1 URL, interact (browse_type / browse_click), and browse_screenshot the broken result (posted to the thread with a title), and record it with factory_record_ui_state (phase=before: the exact broken text you see and why it is wrong - the app re-reads the page itself and rejects claims that do not match). Source edits are refused until this before-evidence exists.
-4. Decide per claim: REAL BUG, WORKING AS DOCUMENTED, or CANNOT REPRODUCE, with evidence (file, doc, issue, commit) for each. Never change documented behavior. Then post your triage: per-claim verdict, root cause with exact evidence (file:line, doc ID, commit), the proposed fix, and your confidence.
+4. Decide per claim: REAL BUG, WORKING AS DOCUMENTED, or CANNOT REPRODUCE, with evidence (file, doc, issue, commit) for each. Never change documented behavior. For a WORKING AS DOCUMENTED verdict on a web UI claim: when the page is already served, verify the correct value in the browser too and post that screenshot as positive evidence (cheaper than being wrong). Then post your triage: per-claim verdict, root cause with exact evidence (file:line, doc ID, commit), the proposed fix, and your confidence.
 5. For a real bug: write a failing regression test first and show it failing, make the smallest fix, run the full checks and factory_scan_diff, then re-check the fixed UI in the browser and browse_screenshot the corrected result (posted to the thread with a title) and record it with factory_record_ui_state (phase=after). The PR gate requires: repro evidence, a passing full test run on the final diff, and (UI cases) after-fix UI evidence on the final diff - any later file change makes them stale.
 6. Open a draft PR with factory_create_pr (a human approves the exact diff). Then post the completion report: what was wrong, what changed, test results, the PR link, and anything you did not verify. If you are blocked or something failed, say BLOCKED/FAILED plainly - never report done with unfinished checks. If nothing is a real bug, say so and open no PR.`;
 
@@ -249,7 +249,17 @@ export class AgentCore {
         if (msg.type === "assistant") {
           for (const block of msg.message.content as any[]) {
             if (block.type === "text" && block.text) {
-              audit.write("message_out", { text: block.text.slice(0, 500) }, threadKey);
+              // Full text lands in a private sidecar file; the JSONL line keeps a preview + pointer.
+              let fullRef: string | undefined;
+              if (block.text.length > 500) {
+                try {
+                  const dir = join(dirname(audit.path), "messages");
+                  mkdirSync(dir, { recursive: true });
+                  fullRef = join(dir, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
+                  writeFileSync(fullRef, block.text);
+                } catch { fullRef = undefined; }
+              }
+              audit.write("message_out", { text: block.text.slice(0, 500), ...(fullRef ? { full_text_file: fullRef } : {}) }, threadKey);
               handlers.onText?.(block.text);
             } else if (block.type === "tool_use") {
               handlers.onToolUse?.(String((block as any).name ?? ""));

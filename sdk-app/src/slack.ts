@@ -182,18 +182,20 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     let statusTs: string | undefined;
     let lastStatusPush = 0;
     const elapsed = () => Math.round((Date.now() - t0) / 1000);
+    const fold = new NarrationFold();
     const pushStatus = async (finalText?: string) => {
       if (!statusTs) return;
       const now = Date.now();
       if (!finalText && now - lastStatusPush < 4000) return;
       lastStatusPush = now;
-      await bolt.client.chat.update({ channel: event.channel, ts: statusTs, text: finalText ?? `:hourglass_flowing_sand: Working... ${toolCalls} tool calls, ${elapsed()}s` }).catch(() => {});
+      const narration = fold.narration ? ` - ${fold.narration}` : "";
+      await bolt.client.chat.update({ channel: event.channel, ts: statusTs, text: finalText ?? `:hourglass_flowing_sand: Working... ${toolCalls} tool calls, ${elapsed()}s${narration}` }).catch(() => {});
     };
     try {
       const statusMsg = await say({ text: `:hourglass_flowing_sand: Working...`, thread_ts: thread });
       statusTs = (statusMsg as any)?.ts;
       await agent.chat(threadKey, text, {
-        onText: (t) => { void sayThread(t); },
+        onText: (t) => { fold.onText(t); void pushStatus(); },
         onApprovalNeeded: (id, summary) => { void sayThread(`Approval needed (${id}): ${summary}\nReply in thread: approve ${id} / deny ${id}`); },
         onToolUse: () => { toolCalls++; void pushStatus(); },
         onApprovalResolved: (ms) => { approvalWaitMs += ms; },
@@ -204,12 +206,16 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
           await bolt.client.filesUploadV2({ channel_id: event.channel, thread_ts: thread, file: readFileSync(path), filename: basename(path), title, initial_comment: title });
         },
       });
+      const done = fold.flush();
+      if (done) await sayThread(done);
       const waitPart = approvalWaitMs > 1000 ? `, of which ~${Math.round(approvalWaitMs / 1000)}s waiting on approval` : "";
       await pushStatus(cancelled
         ? `:octagonal_sign: Stopped by user after ${elapsed()}s (${toolCalls} tool calls).`
         : `:white_check_mark: Done: ${toolCalls} tool calls, ${elapsed()}s total${waitPart}.`);
     } catch (err) {
-      await pushStatus(`:x: Failed after ${elapsed()}s (${toolCalls} tool calls) - details above.`);
+      const partial = fold.flush();
+      if (partial) await sayThread(partial).catch(() => {});
+      await pushStatus(`:x: Failed after ${elapsed()}s (${toolCalls} tool calls) - details below.`);
       await sayThread(renderError(err));
     }
   };
@@ -227,4 +233,19 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
 
 if (process.argv[1]?.endsWith("slack.ts")) {
   void startSlackApp();
+}
+
+/** Narration folding: intermediate assistant text blocks ride the live status
+ * line as a one-line excerpt instead of one thread message per block; only the
+ * LAST text block is posted to the thread at completion/failure. */
+export class NarrationFold {
+  private pendingText = "";
+  private excerpt = "";
+  onText(t: string): void {
+    this.pendingText = t;
+    this.excerpt = t.split("\n")[0].replace(/[*_`>]/g, "").slice(0, 120);
+  }
+  get narration(): string { return this.excerpt; }
+  /** Returns the last text block (the completion) and resets. */
+  flush(): string { const t = this.pendingText; this.pendingText = ""; return t; }
 }

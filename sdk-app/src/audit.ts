@@ -26,7 +26,7 @@ export class AuditLog {
   private lastHash = "genesis";
   private seq = 0;
 
-  constructor(private path: string) {
+  constructor(public readonly path: string) {
     mkdirSync(dirname(path), { recursive: true });
     if (existsSync(path)) {
       const lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);

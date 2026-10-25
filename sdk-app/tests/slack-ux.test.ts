@@ -96,3 +96,14 @@ test("toMrkdwn converts **bold** to Slack *bold* but leaves code spans alone", a
   assert.equal(toMrkdwn("`**not bold**` and **bold**"), "`**not bold**` and *bold*");
   assert.equal(toMrkdwn("no markup"), "no markup");
 });
+
+test("NarrationFold: intermediate blocks fold to excerpts; only the last block flushes", async () => {
+  const { NarrationFold } = await import("../src/slack.js");
+  const f = new NarrationFold();
+  f.onText("The code uses divRoundHalfUp, while docs say half-to-even.\nMore detail here.");
+  assert.equal(f.narration, "The code uses divRoundHalfUp, while docs say half-to-even.");
+  f.onText("**Triage**\n- claim one: real bug");
+  assert.equal(f.narration, "Triage", "markdown stripped from the status excerpt");
+  assert.equal(f.flush(), "**Triage**\n- claim one: real bug", "only the LAST block is posted");
+  assert.equal(f.flush(), "", "flush resets - no duplicate post");
+});
