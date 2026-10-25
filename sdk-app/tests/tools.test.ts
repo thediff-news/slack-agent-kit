@@ -74,3 +74,35 @@ test("ARMED github_create_issue executes gh (controlled local fixture, no GitHub
     process.env.PATH = oldPath;
   }
 });
+
+test("get_doc falls back to the RAG store for index source keys, with ACL enforcement", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tools-rag-"));
+  const config = configFromEnv({ SDK_APP_DRY_RUN: "1" } as any);
+  const audit = new AuditLog(join(dir, "audit.jsonl"));
+  const conn = new MockConnector([]);
+  const { openRagStore } = await import("../src/rag-store.js");
+  const ragStore = openRagStore(join(dir, "rag.db"));
+  await ragStore.rag.replace("fs:docs/deploy-runbook.md", "Rollback: revert the release PR.", "public");
+  await ragStore.rag.replace("notion:secret-page", "top secret runbook", "operator-only");
+
+  // public caller: resolves the public fs source key through the RAG fallback
+  const pub = buildToolHandlers({ connectors: [conn], config, audit, ragStore, aclTags: ["public"] });
+  const g = await pub.getDoc({ id: "fs:docs/deploy-runbook.md" });
+  assert.equal(g.isError, undefined);
+  assert.match(g.content[0].text, /revert the release PR/);
+
+  // public caller: private source key is ACL-denied through the same path
+  const denied = await pub.getDoc({ id: "notion:secret-page" });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /Access denied/);
+
+  // operator caller (wildcard): sees the private doc
+  const op = buildToolHandlers({ connectors: [conn], config, audit, ragStore, aclTags: ["*"] });
+  const ok = await op.getDoc({ id: "notion:secret-page" });
+  assert.match(ok.content[0].text, /top secret runbook/);
+
+  // unknown source key still errors
+  const nf = await op.getDoc({ id: "fs:docs/nope.md" });
+  assert.equal(nf.isError, true);
+  ragStore.rag.close();
+});

@@ -70,6 +70,18 @@ export class Rag {
       .filter((r) => r.score > 0.05);
   }
 
+  /** Fetch the full stored text for an exact source key (chunk order
+   * preserved), or undefined when the source is not indexed. ACL is NOT
+   * enforced here - the caller checks the returned tag. */
+  getSource(source: string): { text: string; acl: string } | undefined {
+    const rows = this.db.prepare("SELECT text, acl FROM chunks WHERE source = ? ORDER BY idx").all(source) as any[];
+    if (!rows.length) return undefined;
+    return {
+      text: rows.map((r) => r.text.replace(/^acl:\s*\S+[ \t]*\n+/, "")).join("\n\n"),
+      acl: rows[0].acl,
+    };
+  }
+
   /** Sync path: drop every stored chunk for a source, then ingest fresh.
    * Used when a source document changed - stale chunks never survive. */
   async replace(source: string, text: string, acl = "public"): Promise<number> {

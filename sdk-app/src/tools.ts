@@ -81,6 +81,20 @@ export function buildToolHandlers(deps: ToolsDeps): ToolHandlers {
           return { content: [{ type: "text" as const, text: `ID: ${doc.id}\nTITLE: ${doc.title}${doc.url ? `\nURL: ${doc.url}` : ""}\n\n${doc.body}` }] };
         }
       }
+      // Fallback: RAG search surfaces index source keys (fs:<path>,
+      // <connector>:<id>) that connectors' native get() does not resolve -
+      // serve the indexed body straight from the store, same ACL check.
+      if (deps.ragStore) {
+        const hit = deps.ragStore.rag.getSource(args.id);
+        if (hit) {
+          if (!aclAllows(hit.acl)) {
+            audit.write("tool_call", { tool: "get_doc", id: args.id, found: true, aclDenied: true, via: "rag" });
+            return { content: [{ type: "text" as const, text: `Access denied: document ${args.id} is not visible to you.` }], isError: true };
+          }
+          audit.write("tool_call", { tool: "get_doc", id: args.id, found: true, via: "rag" });
+          return { content: [{ type: "text" as const, text: `ID: ${args.id}\n\n${hit.text}` }] };
+        }
+      }
       audit.write("tool_call", { tool: "get_doc", id: args.id, found: false });
       return { content: [{ type: "text" as const, text: `No document with ID ${args.id}.` }], isError: true };
     },

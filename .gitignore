@@ -5,3 +5,4 @@ data/
 examples/fixtures/incident-repo/
 examples/fixtures/target-repo/.git/
 kit.config.live.yaml
+sdk-app/state/
