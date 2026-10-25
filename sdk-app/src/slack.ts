@@ -200,6 +200,7 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
         onToolUse: () => { toolCalls++; void pushStatus(); },
         onApprovalResolved: (ms) => { approvalWaitMs += ms; },
         onCancelled: () => { cancelled = true; },
+        onEscalated: (_signal, brief) => { void sayThread(`BLOCKED - ${brief}. Turn stopped. A retry needs your explicit instruction and starts fresh (new session, new clone) - nothing from the stalled turn is replayed.`); },
       }, {
         userId: event.user, surface: "slack", channelId: event.channel, images,
         emitImage: async (path, title) => {

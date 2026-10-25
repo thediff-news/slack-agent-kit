@@ -7,6 +7,7 @@ import type { ApprovalStore } from "./approvals.js";
 import type { AuditLog } from "./audit.js";
 import { qualified, READ_TOOLS, MUTATING_TOOLS, BROWSE_GATED_TOOLS, SERVER_NAME } from "./tools.js";
 import { browseGateDecision, type BrowsePolicy } from "./browse-tools.js";
+import { StallDetector, describeStall, type StallSignal } from "./escalation.js";
 
 /** Injectable so unit tests run without paid API calls. Matches query()'s shape. */
 export type QueryFn = (args: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage>;
@@ -48,6 +49,9 @@ export type ChatHandlers = {
   onApprovalResolved?: (waitMs: number) => void;
   /** The turn was cancelled via stop/cancel. */
   onCancelled?: () => void;
+  /** Bounded stall detected; the turn was stopped. brief is the compact,
+   * reasoned human-readable report. Escalation never auto-retries. */
+  onEscalated?: (signal: StallSignal, brief: string) => void;
 };
 
 const SYSTEM_PROMPT = `You are the user's approval-gated assistant living in their chat.
@@ -77,6 +81,9 @@ export class AgentCore {
    * (the CLI harness also queues; this protects every surface). */
   private turns = new Map<string, Promise<void>>();
   private aborts = new Map<string, AbortController>();
+  /** Thread-level stall detectors: error streaks span turns; refusal counts
+   * reset per turn. */
+  private stalls = new Map<string, StallDetector>();
 
   /** Abort in-flight turns: the exact thread always; when `threadKey` is a
    * fresh top-level message (no turn in that exact thread), fall back to any
@@ -138,6 +145,19 @@ export class AgentCore {
     const queryFn = this.deps.queryFn ?? query;
     const ac = new AbortController();
     this.aborts.set(threadKey, ac);
+    const stall = this.stalls.get(threadKey) ?? new StallDetector();
+    stall.resetRefusals();
+    this.stalls.set(threadKey, stall);
+    let escalated = false;
+    const escalate = (signal: StallSignal, abortTurn: boolean): void => {
+      if (escalated) return;
+      escalated = true;
+      const brief = describeStall(signal);
+      audit.write("escalation", { ...signal, brief } as unknown as Record<string, unknown>, threadKey);
+      handlers.onEscalated?.(signal, brief);
+      if (abortTurn && !ac.signal.aborted) ac.abort();
+    };
+    const toolNames = new Map<string, string>();
     // Identity tier: only an enrolled identity (operator CLI, or a Slack user
     // bound in SDK_APP_USER_ACLS / SDK_APP_APPROVERS) may touch factory,
     // browser or write capabilities. Unknown Slack users get public docs only.
@@ -262,8 +282,23 @@ export class AgentCore {
               audit.write("message_out", { text: block.text.slice(0, 500), ...(fullRef ? { full_text_file: fullRef } : {}) }, threadKey);
               handlers.onText?.(block.text);
             } else if (block.type === "tool_use") {
+              toolNames.set(String((block as any).id ?? ""), String((block as any).name ?? ""));
               handlers.onToolUse?.(String((block as any).name ?? ""));
             }
+          }
+        } else if (msg.type === "user") {
+          // Tool results (gate refusals, permission denials) arrive as user
+          // messages; watch them for identical-refusal loops.
+          const content = (msg as any).message?.content;
+          const blocks = Array.isArray(content) ? content : [];
+          for (const b of blocks as any[]) {
+            if (b?.type !== "tool_result") continue;
+            const text = typeof b.content === "string"
+              ? b.content
+              : (Array.isArray(b.content) ? b.content.filter((c: any) => c?.type === "text").map((c: any) => String(c.text ?? "")).join("\n") : "");
+            if (!text) continue;
+            const sig = stall.observeToolResult(toolNames.get(String(b.tool_use_id ?? "")) ?? "unknown", text);
+            if (sig) escalate(sig, true);
           }
         } else if (msg.type === "result") {
           audit.write("turn_cost", {
@@ -272,15 +307,20 @@ export class AgentCore {
             cost_usd: (msg as any).total_cost_usd,
             num_turns: (msg as any).num_turns,
           }, threadKey);
+          const sig = stall.observeResultSubtype(String(msg.subtype ?? ""), (msg as any).num_turns);
+          if (sig) escalate(sig, false);
+          else if (msg.subtype === "success") stall.resetErrors();
         }
       }
     } catch (e) {
       if (ac.signal.aborted) {
-        audit.write("turn_cancelled", {}, threadKey);
-        handlers.onCancelled?.();
+        audit.write("turn_cancelled", { escalated }, threadKey);
+        if (!escalated) handlers.onCancelled?.();
         return;
       }
       audit.write("error", { message: String(e).slice(0, 300) }, threadKey);
+      const sig = stall.observeError(String(e).slice(0, 300));
+      if (sig) escalate(sig, false);
       throw e;
     } finally {
       this.aborts.delete(threadKey);

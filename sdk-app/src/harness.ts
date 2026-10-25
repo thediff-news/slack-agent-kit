@@ -34,6 +34,8 @@ export function createLineHandler(
         onText: (t) => io.printStream(t),
         onApprovalNeeded: (id, summary) =>
           io.print(`[approval needed] ${id}: ${summary}\nreply: approve ${id} / deny ${id}`),
+        onEscalated: (_signal, brief) =>
+          io.print(`[BLOCKED - escalated] ${brief}\nThe turn was stopped. Retrying needs your explicit instruction and starts fresh - no writes or costs from the stalled turn are replayed.`),
       })
       .catch((e) => io.print(`[error] ${String(e).slice(0, 200)}`))
       .finally(() => { chatting = false; pump(); });
