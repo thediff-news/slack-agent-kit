@@ -273,6 +273,11 @@ export class FactoryTools {
   private async checkpoint(repo: string, reason: CaptureOpts["reason"], evidenceFiles?: string[]): Promise<void> {
     this.lastActiveRepo = repo;
     const stateDir = dirname(this.deps.config.auditLog);
+    // Persist the active-worktree pointer so a post-crash BOOT can re-capture
+    // a worktree whose mutation was killed before its capture ran (the
+    // mutation-to-capture window). Captures are whole-worktree, so this one
+    // boot capture covers every uncaptured change that survived on disk.
+    try { writeFileSync(join(stateDir, "last-active-worktree.json"), JSON.stringify({ repo, dir: this.cloneDir(repo), at: new Date().toISOString() })); } catch { /* pointer is best-effort */ }
     const author = { name: "sdk-app-checkpoint", email: "checkpoint@localhost" };
     try {
       const cap = await captureCheckpoint({ stateDir, repo, dir: this.cloneDir(repo), reason, evidenceFiles, cost: this.costProjection() });

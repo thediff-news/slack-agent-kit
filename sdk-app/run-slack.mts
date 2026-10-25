@@ -1,7 +1,7 @@
 /** Production launcher: budget proxy (hard cap) + Slack surface in one process.
  * Tokens come from the environment (launcher injects them), never from the command line or logs. */
-import { readFileSync } from "node:fs";
-import { recordDebt, settleDebt, syncCheckpoints } from "./src/checkpoint.js";
+import { existsSync, readFileSync } from "node:fs";
+import { captureCheckpoint, recordDebt, settleDebt, syncCheckpoints } from "./src/checkpoint.js";
 import { startBudgetProxy } from "./budget-proxy.mjs";
 import { startSlackApp } from "./src/slack.js";
 import { configFromEnv, evalPreflightProblems } from "./src/config.js";
@@ -44,7 +44,24 @@ const ckptStateDir = (process.env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.json
 const ckptRemote = process.env.SDK_APP_CHECKPOINT_REMOTE;
 const ckptAuthor = { name: "sdk-app-checkpoint", email: "checkpoint@localhost" };
 if (ckptRemote) {
+  // Abrupt-loss recovery: if a kill landed between a mutation and its capture,
+  // no debt marker exists - but the worktree survived on disk. Re-capture the
+  // last active worktree NOW, before any new mutation or paid execution, and
+  // gate on durability via the debt mechanism if the sync fails. Honest limit:
+  // this covers a killed PROCESS; if the whole environment was lost, the
+  // worktree is gone and only already-synced checkpoints survive.
+  try {
+    const pointer = JSON.parse(readFileSync(ckptStateDir + "last-active-worktree.json", "utf8"));
+    if (pointer?.repo && pointer?.dir && existsSync(pointer.dir)) {
+      const cap = await captureCheckpoint({ stateDir: ckptStateDir, repo: pointer.repo, dir: pointer.dir, reason: "manual", requestId: "boot-recovery" });
+      if (!cap.ok) recordDebt(ckptStateDir, { repo: pointer.repo, reason: "manual", at: new Date().toISOString(), error: `boot-recovery capture refused: ${(cap.refused ?? []).join("; ").slice(0, 200)}` });
+      else console.log(`[run-slack] boot-recovery capture of ${pointer.repo} ok`);
+    }
+  } catch { /* no pointer or unreadable: nothing survived to recapture */ }
   const boot = await settleDebt(ckptStateDir, ckptRemote, "auto-checkpoints", ckptAuthor);
+  // Any boot-recovery capture above must reach the remote before work resumes:
+  const bootSync = await syncCheckpoints({ stateDir: ckptStateDir, remote: ckptRemote, branch: "auto-checkpoints", author: ckptAuthor });
+  if (!bootSync.ok) recordDebt(ckptStateDir, { repo: "(boot)", reason: "manual", at: new Date().toISOString(), error: `boot sync failed: ${(bootSync.error ?? "").slice(0, 200)}` });
   if (!boot.cleared) console.error(`[run-slack] CHECKPOINT DEBT at boot: ${boot.pending} unsaved capture(s); sync failed: ${(boot.error ?? "").slice(0, 150)} - the next work step will BLOCK until the checkpoint remote is reachable`);
   let restarting = false;
   const preRestart = (sig: string) => {

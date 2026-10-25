@@ -117,12 +117,17 @@ test("app server invocation: host net shared, mounts/secrets isolated, stores bo
   assert.ok(!app.args.includes("--unshare-net"), "app server shares host net (NONBLIND label)");
   assert.ok(app.args.includes("--die-with-parent"));
   assert.ok(app.args.includes("GH_TOKEN="), "env scrubbed");
-  assert.ok(app.args.includes("/opt/pnpm-store"), "pnpm store bound (warm offline install)");
-  assert.ok(app.args.includes("npm_config_store_dir=/opt/pnpm-store"));
-  assert.ok(app.args.includes("/opt/corepack"), "corepack cache bound");
+  // the bind is conditional by design: present only when a host store exists
+  const { computeSandboxExtras } = await import("../src/eval-lockdown.js");
+  const { existsSync } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  const hostStore = process.env.PNPM_STORE_DIR ?? `${homedir()}/.local/share/pnpm/store`;
+  assert.equal(app.args.includes("/opt/pnpm-store"), existsSync(hostStore), "pnpm store bound iff the host store exists");
+  const hostCorepack = `${homedir()}/.cache/node/corepack`;
+  assert.equal(app.args.includes("/opt/corepack"), existsSync(hostCorepack), "corepack cache bound iff present on the host");
   const chk = lockdownInvocation("true", "/tmp/clone", "bwrap");
   assert.ok(chk.args.includes("--unshare-net"), "checks still fully offline");
-  assert.ok(chk.args.includes("/opt/pnpm-store"), "checks also see the store for pnpm install");
+  assert.equal(chk.args.includes("/opt/pnpm-store"), existsSync(hostStore), "checks see the store iff the host has one");
 });
 
 test("eval lockdown: fresh clones get NO node_modules toolchain symlink", async () => {
@@ -154,4 +159,19 @@ test("lockdown command surface: npm ci allowed (lockfile-pure offline install), 
 test("lockdown command surface: npm run test-backend and similar test scripts allowed", () => {
   assert.ok(EVAL_SAFE_CMD.test("npm run test-backend"));
   assert.ok(EVAL_SAFE_CMD.test("npm test"));
+});
+test("sandbox extras: cache dirs ro-bound iff present on the host (both branches)", async () => {
+  const { computeSandboxExtras } = await import("../src/eval-lockdown.js");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const present = mkdtempSync(join(tmpdir(), "store-"));
+  const absent = join(tmpdir(), "definitely-not-here-7f3a9b");
+  const withStore = computeSandboxExtras({ pnpmStore: present, corepackHome: absent, npmCache: absent });
+  assert.ok(withStore.binds.includes("/opt/pnpm-store"), "existing store is ro-bound");
+  assert.ok(withStore.binds.includes("--ro-bind"), "bind is read-only");
+  assert.ok(withStore.env.includes("npm_config_store_dir=/opt/pnpm-store"));
+  const without = computeSandboxExtras({ pnpmStore: absent, corepackHome: absent, npmCache: absent });
+  assert.equal(without.binds.length, 0, "no host dirs -> no binds (never a fake mount)");
+  assert.equal(without.env.length, 0);
 });
