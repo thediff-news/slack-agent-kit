@@ -68,7 +68,7 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
       // Thread binding: the decision must come from the same Slack thread the
       // request was made in - nobody can approve from another channel/DM.
       const r = approvals.resolve(m[2], m[1].toLowerCase() === "approve", event.user ?? "slack-user", threadKey);
-      await sayThread(r === "resolved" ? `${m[1]}ed ${m[2]}.` : r === "wrong-thread" ? `Approval ${m[2]} belongs to another conversation.` : `No pending approval ${m[2]}.`);
+      await sayThread(r === "resolved" ? `${m[1].toLowerCase() === "approve" ? "Approved" : "Denied"} ${m[2]}.` : r === "wrong-thread" ? `Approval ${m[2]} belongs to another conversation.` : `No pending approval ${m[2]}.`);
       return;
     }
     try {
