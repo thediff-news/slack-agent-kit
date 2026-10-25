@@ -11,6 +11,8 @@ const proxy = await startBudgetProxy({
   model: "claude-sonnet-5-5", maxOutputTokens: 4096,
   inputRatePerMTok: 2.50, outputRatePerMTok: 10,
   upstreamBase: "https://api.anthropic.com", realKey,
+  statePath: process.env.SDK_APP_PROXY_STATE || undefined,
+  basisUsd: Number(process.env.SDK_APP_PROXY_BASIS_USD || "0"),
 });
 process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}`;
 process.env.ANTHROPIC_API_KEY = "proxy-managed";

@@ -47,7 +47,7 @@ export function createLineHandler(
       if (m) {
         // approvals resolve immediately - never queued behind a chat turn
         const r = approvals.resolve(m[2], m[1].toLowerCase() === "approve", "cli-user", threadKey);
-        io.print(r === "resolved" ? `${m[1]}ed ${m[2]}` : r === "wrong-thread" ? `approval ${m[2]} belongs to another conversation` : `no pending approval ${m[2]}`);
+        io.print(r.status === "resolved" ? `${m[1]}ed ${m[2]}${r.resumed ? "" : " (after restart - repeat the request to run it)"}` : r.status === "wrong-thread" ? `approval ${m[2]} belongs to another conversation` : `no pending approval ${m[2]}`);
       } else if (text === "pending") {
         io.print(approvals.list().map((r) => `${r.id}: ${r.summary}`).join("\n") || "(none)");
       } else {

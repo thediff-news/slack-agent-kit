@@ -149,7 +149,7 @@ export function buildKitServer(deps: ToolsDeps) {
 
   const factoryTools = deps.factory
     ? [
-        tool("factory_clone", "Clone an allowlisted repo (or local fixture path) into an isolated factory workspace and start a factory/* branch.", { repo: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.clone(a.repo) }] })),
+        tool("factory_clone", "Clone an allowlisted repo (or local fixture path) into an isolated factory workspace and start a factory/* branch. Pass ref when the fix targets a non-default branch (e.g. a branch under review).", { repo: z.string(), ref: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.clone(a.repo, a.ref) }] })),
         tool("factory_list_files", "List files in the factory clone.", { repo: z.string(), subdir: z.string().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.listFiles(a.repo, a.subdir) }] })),
         tool("factory_read_file", "Read a file inside the factory clone.", { repo: z.string(), path: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.readFile(a.repo, a.path) }] })),
         tool("factory_write_file", "Write a file inside the factory clone (scratch workspace; the PR gate protects the real repo).", { repo: z.string(), path: z.string(), content: z.string() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.factory!.writeFile(a.repo, a.path, a.content) }] })),

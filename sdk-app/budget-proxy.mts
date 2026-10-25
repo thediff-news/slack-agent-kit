@@ -28,6 +28,7 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 import { once } from "node:events";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 
 export interface ProxyConfig {
   totalUsd: number;        // hard cumulative bound, e.g. 1.90
@@ -37,6 +38,12 @@ export interface ProxyConfig {
   outputRatePerMTok: number; // 10
   upstreamBase: string;    // https://api.anthropic.com (or http://127.0.0.1:x for tests)
   realKey: string;
+  /** Optional durable ledger: cumulative bound survives process restarts, so
+   * the cap is enforceable across app restarts instead of per-process. */
+  statePath?: string;
+  /** Conservative spend that happened OUTSIDE this ledger (prior sessions,
+   * unsettled reservations): counted against the cap from the first request. */
+  basisUsd?: number;
 }
 
 /** Per-request upper bound in USD. count_tokens is documented as an estimate
@@ -130,6 +137,19 @@ async function upstreamJson(cfg: ProxyConfig, path: string, body: string): Promi
 
 export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number; spentBoundUsd: () => number; close: () => void }> {
   let cumulative = 0;
+  if (cfg.statePath) {
+    try {
+      const prior = JSON.parse(readFileSync(cfg.statePath, "utf8"));
+      if (typeof prior.cumulative === "number" && prior.cumulative >= 0) cumulative = prior.cumulative;
+    } catch { /* no ledger yet - starts at 0 */ }
+  }
+  const basis = cfg.basisUsd ?? 0;
+  const persist = () => {
+    if (!cfg.statePath) return;
+    const tmp = cfg.statePath + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ cumulative, updated: new Date().toISOString() }));
+    renameSync(tmp, cfg.statePath);
+  };
   const server = http.createServer(async (clientReq, clientRes) => {
     try {
       const chunks: Buffer[] = [];
@@ -188,12 +208,13 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       const boundExact = requestBoundUsd(inputTokens, body.max_tokens, cfg);
       console.log(`[budget-proxy] ${new Date().toISOString()} gate req counted_input=${inputTokens} max_tokens=${body.max_tokens} bound_usd=${boundExact.toFixed(6)} cumulative_before_usd=${cumulative.toFixed(6)}`);
       const bound = boundExact;
-      if (cumulative + bound > cfg.totalUsd) {
+      if (basis + cumulative + bound > cfg.totalUsd) {
         clientRes.writeHead(429, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_exceeded", message: `budget proxy hard cap: bound $${bound.toFixed(4)} would exceed cumulative cap $${cfg.totalUsd} (bound so far $${cumulative.toFixed(4)})` } }));
         return;
       }
       cumulative += bound; // charged conservatively BEFORE forwarding; actual <= bound
+      persist();
       const r = await upstreamRaw(cfg, url, JSON.stringify(body));
       clientRes.writeHead(r.status, r.headers);
       r.res.pipe(clientRes); // SSE stream passes through untouched
@@ -206,5 +227,6 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const port = (server.address() as net.AddressInfo).port;
-  return { port, spentBoundUsd: () => cumulative, close: () => server.close() };
+  persist();
+  return { port, spentBoundUsd: () => basis + cumulative, close: () => server.close() };
 }

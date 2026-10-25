@@ -32,20 +32,25 @@ export class FactoryTools {
   }
 
   /** repo is "owner/name" (cloned via gh, must be in SDK_APP_GITHUB_REPOS) or an absolute local path (tests/fixtures). */
-  async clone(repo: string): Promise<string> {
+  async clone(repo: string, ref?: string): Promise<string> {
     const allowed = this.deps.config.githubRepos.includes(repo) || repo.startsWith("/");
     if (!allowed) return `BLOCKED: ${repo} is not in the repo allowlist (SDK_APP_GITHUB_REPOS). Ask a human to add it.`;
     const dir = this.cloneDir(repo);
     if (!existsSync(dir)) {
       if (repo.startsWith("/")) await run("git", ["clone", "-q", repo, dir]);
       else await run("gh", ["repo", "clone", repo, dir, "--", "-q", "--depth", "50"]);
+    }
+    if (ref) {
+      // a fix may target a branch under review, not the default branch
+      await run("git", ["-C", dir, "fetch", "--quiet", "origin", ref]);
+      await run("git", ["-C", dir, "checkout", "-q", "FETCH_HEAD"]);
     } else {
       await run("git", ["-C", dir, "fetch", "--quiet", "origin", "HEAD"]).catch(() => {});
     }
     const branch = `factory/sdk-${Date.now().toString(36)}`;
     await run("git", ["-C", dir, "checkout", "-q", "-B", branch]);
-    this.deps.audit.write("tool_call", { tool: "factory_clone", repo, dir, branch });
-    return `cloned ${repo} -> ${dir} on branch ${branch}`;
+    this.deps.audit.write("tool_call", { tool: "factory_clone", repo, dir, branch, ref });
+    return `cloned ${repo}${ref ? ` @ ${ref}` : ""} -> ${dir} on branch ${branch}`;
   }
 
   private guardPath(repo: string, rel: string): string {
@@ -118,12 +123,23 @@ export class FactoryTools {
     if (!scan.clean) return `BLOCKED: secrets in the diff: ${scan.findings.join("; ")}`;
     const { stdout: stat } = await run("git", ["-C", dir, "diff", "--stat", "HEAD"]);
     const branch = (await run("git", ["-C", dir, "branch", "--show-current"])).stdout.trim();
+    const { stdout: dirty } = await run("git", ["-C", dir, "status", "--porcelain"]);
+    // Idempotency: an open PR for this exact branch already exists -> return
+    // it instead of double-pushing/double-opening on a retried turn.
+    const existing = await run("gh", ["pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"]).then((r) => r.stdout.trim()).catch(() => "");
+    if (!dirty.trim() && !existing) return `No changes on ${branch} and no open PR - nothing to do.`;
     if (this.deps.config.dryRun) {
-      return `[dry-run] would commit on ${branch}, push, and open a PR in ${repo}:\nTITLE: ${title}\nDIFF STAT:\n${stat}\nArm with SDK_APP_DRY_RUN=0 to execute.`;
+      return `[dry-run] would ${dirty.trim() ? `commit on ${branch}, push, and ` : ""}${existing ? "re-use the existing open PR" : "open a PR"} in ${repo}:\nTITLE: ${title}\nDIFF STAT:\n${stat || "(no diff)"}${existing ? `\nEXISTING PR: ${existing}` : ""}\nArm with SDK_APP_DRY_RUN=0 to execute.`;
     }
-    await run("git", ["-C", dir, "add", "-A"]);
-    await run("git", ["-C", dir, "commit", "-q", "-m", title]);
-    await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+    if (dirty.trim()) {
+      await run("git", ["-C", dir, "add", "-A"]);
+      await run("git", ["-C", dir, "commit", "-q", "-m", title]);
+      await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+    }
+    if (existing) {
+      this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: existing, idempotent: true });
+      return `PR already open for ${branch}: ${existing} (no duplicate created).`;
+    }
     const { stdout } = await run("gh", ["pr", "create", "--repo", repo, "--title", title, "--body", body, "--draft"]);
     this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: stdout.trim() });
     return `PR created: ${stdout.trim()}`;

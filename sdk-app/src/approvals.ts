@@ -55,16 +55,20 @@ export class ApprovalStore {
   }
 
   /** Resolve exactly once, and only from the thread the request was made in.
-   * Returns "resolved" | "unknown" | "wrong-thread". */
-  resolve(id: string, approved: boolean, resolver: string, fromThread?: string): "resolved" | "unknown" | "wrong-thread" {
+   * Returns "resolved" | "unknown" | "wrong-thread"; on "resolved", `resumed`
+   * tells whether a live turn consumed the decision (false after a restart -
+   * the caller should tell the thread the decision landed but the original
+   * turn is gone). */
+  resolve(id: string, approved: boolean, resolver: string, fromThread?: string): { status: "resolved" | "unknown" | "wrong-thread"; resumed: boolean } {
     const req = this.pending.get(id);
-    if (!req) return "unknown";
-    if (fromThread !== undefined && fromThread !== req.thread) return "wrong-thread";
+    if (!req) return { status: "unknown", resumed: false };
+    if (fromThread !== undefined && fromThread !== req.thread) return { status: "wrong-thread", resumed: false };
     this.pending.delete(id);
     this.append({ type: "resolved", id, approved, resolver, at: new Date().toISOString() });
-    this.waiters.get(id)?.(approved);
+    const waiter = this.waiters.get(id);
     this.waiters.delete(id);
-    return "resolved";
+    waiter?.(approved);
+    return { status: "resolved", resumed: waiter !== undefined };
   }
 
   /** Re-check that a payload still matches what was approved (ledger audit). */

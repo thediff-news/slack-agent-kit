@@ -90,3 +90,43 @@ test("mutating tool is gated: approve allows, deny denies, read tools auto-allow
   assert.equal(needed.length, 2, "surface was notified for both mutating calls");
 });
 function agent0(s: any) { return s.agent as AgentCore; }
+
+test("multi-user same-thread isolation: unknown user identity-denied, enrolled user reaches approval gate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-mu-"));
+  const config = configFromEnv({
+    SDK_APP_USER_ACLS: JSON.stringify({ U1: [] }),
+    SDK_APP_RBAC_USERS: JSON.stringify({ U1: "chief" }),
+    SDK_APP_RBAC_ROLES: JSON.stringify({ chief: ["read", "propose", "approve"] }),
+  } as any);
+  const audit = new AuditLog(join(dir, "audit.jsonl"));
+  const approvals = new ApprovalStore(join(dir, "approvals.jsonl"));
+  const mcpServer = buildKitServer({ connectors: [new EmptyConnector()], config, audit });
+  const decisions: Record<string, any> = {};
+  let call = 0;
+  const fakeQuery = async function* ({ options }: any) {
+    const who = call++ === 0 ? "U0" : "U1"; // turns on one thread serialize: U0 first
+    decisions[who] = await options.canUseTool(qualified("github_create_issue"), { repo: "o/r", title: "T", body: "b" });
+    yield resultMsg();
+  };
+  const agent = new AgentCore({ config, mcpServer, approvals, audit, queryFn: fakeQuery });
+
+  // unknown user in the thread: identity-denied before capability or approval
+  await (agent as any).chat("C1:1.1", "create issue", {}, { userId: "U0", surface: "slack" });
+  // enrolled user in the SAME thread: passes identity, 'propose' cap, hits approval gate
+  const pending: string[] = [];
+  const chatP = (agent as any).chat("C1:1.1", "create issue", { onApprovalNeeded: (id: string) => pending.push(id) }, { userId: "U1", surface: "slack" });
+  let req;
+  for (let i = 0; i < 100 && !req; i++) { await new Promise((r) => setTimeout(r, 20)); req = approvals.list()[0]; }
+  assert.ok(req, "approval was requested for the enrolled user");
+  approvals.resolve(req.id, true, "approver", "C1:1.1");
+  await chatP;
+
+  assert.equal(decisions.U0?.behavior, "deny", "unknown user denied");
+  assert.match(decisions.U0?.message ?? "", /identity/i);
+  assert.equal(decisions.U1?.behavior, "allow", "enrolled user approved through gate");
+  assert.equal(pending.length, 1, "approval surfaced only for the enrolled user");
+
+  const lines = readFileSync(join(dir, "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(lines.some((e) => e.kind === "identity_denied" && e.detail.user === "U0"));
+  assert.ok(lines.some((e) => e.kind === "approval_requested"));
+});
