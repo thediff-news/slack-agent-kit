@@ -75,7 +75,7 @@ export async function runStage(args: StageArgs): Promise<void> {
     // network allowlist, which admits api.anthropic.com only
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     // enforced per-request bounds (names verified in the bundled CLI)
-    CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192",
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: process.env.CLAUDE_STAGE_MAX_OUTPUT_TOKENS ?? "8192",
     CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: "4096",
     BASH_MAX_OUTPUT_LENGTH: "4096",
   } as Record<string, string>;
@@ -89,7 +89,7 @@ export async function runStage(args: StageArgs): Promise<void> {
     proxy = await startBudgetProxy({
       totalUsd: args.maxBudgetUsd ?? 1.90, // per-round hard cap = the round budget
       model: args.model,
-      maxOutputTokens: 8192,
+      maxOutputTokens: Number(process.env.CLAUDE_STAGE_MAX_OUTPUT_TOKENS ?? "8192"),
       inputRatePerMTok: 2.50, // Sonnet 5.5 cache-write (highest input-side rate), claude.com/pricing
       outputRatePerMTok: 10,  // Sonnet 5.5 output
       upstreamBase: "https://api.anthropic.com",

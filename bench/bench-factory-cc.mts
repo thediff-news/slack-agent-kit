@@ -29,7 +29,7 @@ const request = "the browse planner (HttpPlanner in src/browse/planner.ts) calls
 try {
   const res = await Promise.race([
     runFactory({
-      repo: "thediff-news/slack-agent-kit", request, llm: llm as any, ...(stageLlms ? { llms: stageLlms as any } : {}), maxEditRounds: 3,
+      repo: "thediff-news/slack-agent-kit", request, llm: llm as any, ...(stageLlms ? { llms: stageLlms as any } : {}), maxEditRounds: Number(process.env.FACTORY_MAX_EDIT_ROUNDS ?? "3"),
       codeEngine: "claude" as const, claudeModel: model, claudeMaxTurns: maxTurns, claudeSandbox: true, claudeMaxBudgetUsd: roundBudget, claudeTotalBudgetUsd: totalBudget,
       hooks: { audit: (event, detail) => audit.push({ ts: Date.now() - t0, event, detail }), approvePlan: async () => true, note: () => {} },
       openPr: async () => "bench://no-pr",
