@@ -5,6 +5,7 @@
  * a PR is approval-gated + dry-run unless armed. Never merges, never
  * pushes to main. */
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { captureCheckpoint, syncCheckpoints, type CaptureOpts } from "./checkpoint.js";
 import { appServerInvocation, checkEvalCommand, lockdownInvocation, EVAL_SAFE_CMD, type SandboxKind } from "./eval-lockdown.js";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -117,6 +118,9 @@ export type FactoryDeps = {
 
 export class FactoryTools {
   private workRoot: string;
+  /** Most recent case repo: used for the turn-end checkpoint when the turn
+   * itself carries no repo context. Single-case-at-a-time by design. */
+  private lastActiveRepo?: string;
   constructor(private deps: FactoryDeps) {
     this.workRoot = deps.config.auditLog.replace(/[^/]+$/, "factory-clones");
     mkdirSync(this.workRoot, { recursive: true });
@@ -128,6 +132,7 @@ export class FactoryTools {
 
   /** repo is "owner/name" (cloned via gh, must be in SDK_APP_GITHUB_REPOS) or an absolute local path (tests/fixtures). */
   async clone(repo: string, ref?: string, turnCtx?: { threadKey?: string; hasImages?: boolean }): Promise<string> {
+    this.lastActiveRepo = repo;
     // eval lockdown: local paths are out of the eval boundary - allowlisted remotes only
     const allowed = this.deps.config.githubRepos.includes(repo) || (!this.deps.config.evalLockdown && repo.startsWith("/"));
     if (!allowed) return `BLOCKED: ${repo} is not in the repo allowlist (SDK_APP_GITHUB_REPOS). Ask a human to add it.`;
@@ -261,6 +266,53 @@ export class FactoryTools {
     try { writeFileSync(this.wfPath(repo), JSON.stringify(st, null, 2)); } catch { /* pre-clone: no dir yet */ }
   }
 
+  /** Best-effort LOCAL capture after every material mutation: the worktree
+   * patch + untracked source/test bytes + sanitized cost projection. Never
+   * breaks the mutation itself; remote ACK is only mandatory at the critical
+   * transitions (requireDurable). */
+  private async checkpoint(repo: string, reason: CaptureOpts["reason"], evidenceFiles?: string[]): Promise<void> {
+    this.lastActiveRepo = repo;
+    try {
+      await captureCheckpoint({ stateDir: dirname(this.deps.config.auditLog), repo, dir: this.cloneDir(repo), reason, evidenceFiles, cost: this.costProjection() });
+    } catch { /* local capture is best-effort; critical paths use requireDurable */ }
+  }
+
+  /** Sanitized cost projection: cumulative + preserved unknown/held markers.
+   * Never copies the raw ledger file (allowlist forbids it). */
+  private costProjection() {
+    try {
+      const raw = JSON.parse(readFileSync(this.deps.config.proxyState ?? "", "utf8"));
+      return { cumulative: typeof raw.cumulative === "number" ? raw.cumulative : null, unknownReqIds: Object.keys(raw.reservations ?? {}).filter((k) => raw.reservations[k]?.settled !== true), held: typeof raw.held === "number" ? raw.held : null };
+    } catch { return { cumulative: null, unknownReqIds: [], held: null }; }
+  }
+
+  /** Turn-end checkpoint: best-effort local capture + remote sync attempt for
+   * the active case. Not a critical transition: failures are audited, not
+   * thrown, so a dead remote never blocks turn completion. */
+  async checkpointTurnEnd(): Promise<void> {
+    const repo = this.lastActiveRepo;
+    if (!repo) return;
+    try {
+      const stateDir = dirname(this.deps.config.auditLog);
+      const cap = await captureCheckpoint({ stateDir, repo, dir: this.cloneDir(repo), reason: "turn-end", cost: this.costProjection() });
+      if (cap.ok && this.deps.config.checkpointRemote) await syncCheckpoints({ stateDir, remote: this.deps.config.checkpointRemote, branch: "auto-checkpoints", author: { name: "sdk-app-checkpoint", email: "checkpoint@localhost" } });
+    } catch { /* best-effort */ }
+  }
+
+  /** Critical-transition guard (approval pause / restart): capture + sync,
+   * FAIL CLOSED unless the private remote ACKs. When SDK_APP_CHECKPOINT_REMOTE
+   * is unset the guard performs the local capture and reports the missing
+   * configuration instead of silently passing. */
+  async requireDurable(repo: string, reason: CaptureOpts["reason"], requestId?: string): Promise<string | undefined> {
+    const stateDir = dirname(this.deps.config.auditLog);
+    const cap = await captureCheckpoint({ stateDir, repo, dir: this.cloneDir(repo), reason, requestId, cost: this.costProjection() });
+    if (!cap.ok) return `BLOCKED: durable checkpoint REFUSED: ${(cap.refused ?? []).join("; ")}`;
+    if (!this.deps.config.checkpointRemote) return `BLOCKED: SDK_APP_CHECKPOINT_REMOTE unset - refusing to pause for approval without durable checkpoint sync`;
+    const sync = await syncCheckpoints({ stateDir, remote: this.deps.config.checkpointRemote, branch: "auto-checkpoints", author: { name: "sdk-app-checkpoint", email: "checkpoint@localhost" } });
+    if (!sync.ok) return `BLOCKED: durable checkpoint sync failed (${(sync.error ?? "").slice(0, 200)}) - refusing the critical transition; retry when the private remote is reachable`;
+    return undefined;
+  }
+
   /** Content hash of the clone's full state: HEAD + complete diff vs HEAD with
    * untracked files intent-to-added. Any change - tool, shell, git - moves it. */
   private async treeHash(dir: string): Promise<string> {
@@ -353,6 +405,7 @@ export class FactoryTools {
     st.writes++;
     if (!isTest) st.sourceWrites++;
     this.saveWf(repo, st);
+    await this.checkpoint(repo, "mutation");
     this.deps.audit.write("tool_call", { tool: "factory_write_file", repo, path, bytes: content.length });
     return `wrote ${path} (${content.length} bytes)`;
   }
@@ -412,6 +465,7 @@ export class FactoryTools {
         st.greenRun = { cmd, at, tree: await this.treeHash(dir) };
       }
       this.saveWf(repo, st);
+      await this.checkpoint(repo, "mutation");
     };
     try {
       const { stdout, stderr } = await run(runFile, runArgs, { cwd: dir, timeout: 240_000, maxBuffer: 4 * 1024 * 1024 });
@@ -654,6 +708,7 @@ export class FactoryTools {
       st.afterAssertion = { observed: observed.slice(0, 500), meaning: meaning.slice(0, 500), at, tree: await this.treeHash(dir) };
     }
     this.saveWf(repo, st);
+    await this.checkpoint(repo, "mutation");
     this.deps.audit.write("tool_call", { tool: "factory_record_ui_state", repo, phase, observed: observed.slice(0, 120), verified: true });
     return `verified: "${observed.slice(0, 120)}" is present on the ${where}; recorded as ${phase}-evidence.`;
   }

@@ -18,6 +18,10 @@ export type AppConfig = {
   evalLockdown: boolean;
   /** Append-only audit JSONL path. */
   auditLog: string;
+  /** Private remote (URL or file://) the auto-checkpoint syncs to; when set, critical transitions require its ACK (fail closed). */
+  checkpointRemote?: string;
+  /** Budget-proxy ledger path for the sanitized cost projection. */
+  proxyState?: string;
   /** Approval ledger JSONL path. */
   approvalsLog: string;
   /** Max SDK turns per user message (bounds tool loop + cost per reply). */
@@ -92,6 +96,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     githubRepos: (env.SDK_APP_GITHUB_REPOS || "").split(",").map((s) => s.trim()).filter(Boolean),
     evalLockdown: (env.SDK_APP_EVAL_LOCKDOWN || "") === "1",
     auditLog: env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.jsonl",
+    checkpointRemote: env.SDK_APP_CHECKPOINT_REMOTE || undefined,
+    proxyState: env.SDK_APP_PROXY_STATE || undefined,
     approvalsLog: env.SDK_APP_APPROVALS_LOG || "sdk-app/state/approvals.jsonl",
     maxTurnsPerMessage: Number(env.SDK_APP_MAX_TURNS) || 8,
     dryRun: env.SDK_APP_DRY_RUN !== "0",
@@ -147,6 +153,7 @@ export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): stri
   if (c.dryRun) problems.push("SDK_APP_DRY_RUN is not 0 (writes would be simulated)");
   if (!process.env.SDK_APP_PROXY_CAP_USD) problems.push("SDK_APP_PROXY_CAP_USD unset (budget cap would silently default)");
   if (!process.env.SDK_APP_PROXY_STATE) problems.push("SDK_APP_PROXY_STATE unset (spend ledger not durable)");
+  if (!process.env.SDK_APP_CHECKPOINT_REMOTE) problems.push("SDK_APP_CHECKPOINT_REMOTE unset (worktree/evidence checkpoints are local-only; a sandbox rebuild would lose uncommitted work)");
   const rbacOk = Object.entries(c.rbac.users).some(([u, role]) => (c.rbac.roles[role] ?? []).includes("propose") && (c.userAcls[u] !== undefined || c.approvers.includes(u)));
   if (!rbacOk) problems.push("no enrolled identity has an RBAC role granting 'propose' (SDK_APP_RBAC_USERS/SDK_APP_RBAC_ROLES) - factory/browser stay locked");
   return problems;

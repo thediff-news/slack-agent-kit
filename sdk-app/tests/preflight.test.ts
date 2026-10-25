@@ -15,12 +15,14 @@ const goodEnv = {
 test("eval preflight: complete config yields no problems", () => {
   process.env.SDK_APP_PROXY_CAP_USD = "4.00";
   process.env.SDK_APP_PROXY_STATE = "/tmp/x.json";
+  process.env.SDK_APP_CHECKPOINT_REMOTE = "file:///tmp/x-checkpoints.git";
   assert.deepEqual(evalPreflightProblems(configFromEnv(goodEnv)), []);
 });
 
 test("eval preflight: every missing critical setting is named", () => {
   delete process.env.SDK_APP_PROXY_CAP_USD;
   delete process.env.SDK_APP_PROXY_STATE;
+  delete process.env.SDK_APP_CHECKPOINT_REMOTE;
   const problems = evalPreflightProblems(configFromEnv({ SDK_APP_EVAL_LOCKDOWN: "1" } as any));
   assert.ok(problems.some((p) => p.includes("GITHUB_REPOS")));
   assert.ok(problems.some((p) => p.includes("APPROVERS")));

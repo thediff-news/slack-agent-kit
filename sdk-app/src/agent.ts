@@ -215,6 +215,15 @@ export class AgentCore {
         return { behavior: "allow", updatedInput: input };
       }
       if ((MUTATING_TOOLS as readonly string[]).some((m) => toolName === qualified(m))) {
+        // Critical transition: NEVER pause for human approval over undurable
+        // work - capture + sync the checkpoint first, fail closed.
+        if (shortName.startsWith("factory_") && this.deps.factory) {
+          const block = await this.deps.factory.requireDurable(String(input.repo ?? ""), "pre-approval").catch((e) => `BLOCKED: durable checkpoint error: ${String(e).slice(0, 200)}`);
+          if (block) {
+            audit.write("checkpoint_refused", { tool: shortName }, threadKey);
+            return { behavior: "deny", message: `${block} The approval pause is refused until the checkpoint is durable; fix the checkpoint remote and retry.` };
+          }
+        }
         let summary = `${toolName}(${Object.entries(input).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(", ")})`;
         // Approval binds the EXACT branch diff: record the diff fingerprint the
         // human approves; factory_create_pr verifies it unchanged at execution.
@@ -323,6 +332,7 @@ export class AgentCore {
       if (sig) escalate(sig, false);
       throw e;
     } finally {
+      if (this.deps.factory) await this.deps.factory.checkpointTurnEnd().catch(() => {});
       this.aborts.delete(threadKey);
     }
   }
