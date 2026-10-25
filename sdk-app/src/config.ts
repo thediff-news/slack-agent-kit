@@ -14,6 +14,8 @@ export type AppConfig = {
   docsRoot: string;
   /** GitHub repos the github connector can search, e.g. ["thediff-news/slack-agent-kit"]. */
   githubRepos: string[];
+  /** Eval lockdown: run_checks is sandboxed (netns, no network) + command-sanitized. */
+  evalLockdown: boolean;
   /** Append-only audit JSONL path. */
   auditLog: string;
   /** Approval ledger JSONL path. */
@@ -88,6 +90,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     chatModel: env.SDK_APP_MODEL_CHAT || "",
     docsRoot: env.SDK_APP_DOCS_ROOT || "docs",
     githubRepos: (env.SDK_APP_GITHUB_REPOS || "").split(",").map((s) => s.trim()).filter(Boolean),
+    evalLockdown: (env.SDK_APP_EVAL_LOCKDOWN || "") === "1",
     auditLog: env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.jsonl",
     approvalsLog: env.SDK_APP_APPROVALS_LOG || "sdk-app/state/approvals.jsonl",
     maxTurnsPerMessage: Number(env.SDK_APP_MAX_TURNS) || 8,

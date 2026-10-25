@@ -5,6 +5,7 @@
  * a PR is approval-gated + dry-run unless armed. Never merges, never
  * pushes to main. */
 import { execFile } from "node:child_process";
+import { checkEvalCommand, lockdownInvocation } from "./eval-lockdown.js";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { dirname } from "node:path";
@@ -114,6 +115,11 @@ export class FactoryTools {
   async clone(repo: string, ref?: string, turnCtx?: { threadKey?: string; hasImages?: boolean }): Promise<string> {
     const allowed = this.deps.config.githubRepos.includes(repo) || repo.startsWith("/");
     if (!allowed) return `BLOCKED: ${repo} is not in the repo allowlist (SDK_APP_GITHUB_REPOS). Ask a human to add it.`;
+    if (this.deps.config.evalLockdown) {
+      // fail closed: eval runs are not "blind" without OS-level network isolation
+      const ok = await run("unshare", ["-Urn", "true"]).then(() => true).catch(() => false);
+      if (!ok) return "BLOCKED: eval lockdown is on but OS network namespaces are unavailable here - refusing an unisolated eval run. Run without SDK_APP_EVAL_LOCKDOWN only for non-eval work.";
+    }
     const dir = this.cloneDir(repo);
     if (!existsSync(dir)) {
       if (repo.startsWith("/")) await run("git", ["clone", "-q", repo, dir]);
@@ -344,6 +350,20 @@ export class FactoryTools {
     const dir = this.cloneDir(repo);
     this.deps.audit.write("tool_call", { tool: "factory_run", repo, cmd });
     const isTest = TEST_CMD.test(cmd.trim());
+    let runFile = "sh";
+    let runArgs = ["-c", cmd];
+    if (this.deps.config.evalLockdown) {
+      const blocked = checkEvalCommand(cmd);
+      if (blocked) {
+        this.deps.audit.write("tool_call", { tool: "factory_run", repo, cmd, refused: "eval-lockdown" });
+        return `BLOCKED: ${blocked}`;
+      }
+      const script = join(this.workRoot, `.eval-check-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.sh`);
+      writeFileSync(script, `#!/bin/sh\nip link set lo up 2>/dev/null || true\nexec sh -c ${JSON.stringify(cmd)}\n`);
+      const inv = lockdownInvocation(cmd, script);
+      runFile = inv.file;
+      runArgs = inv.args;
+    }
     const record = async (exitCode: number) => {
       if (!isTest) return;
       const st = this.loadWf(repo);
@@ -358,7 +378,7 @@ export class FactoryTools {
       this.saveWf(repo, st);
     };
     try {
-      const { stdout, stderr } = await run("sh", ["-c", cmd], { cwd: dir, timeout: 240_000, maxBuffer: 4 * 1024 * 1024 });
+      const { stdout, stderr } = await run(runFile, runArgs, { cwd: dir, timeout: 240_000, maxBuffer: 4 * 1024 * 1024 });
       await record(0);
       return (stdout + stderr).slice(-4000) || "(no output, exit 0)";
     } catch (e: any) {
