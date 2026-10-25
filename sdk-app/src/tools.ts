@@ -5,12 +5,15 @@ import { z } from "zod";
 import type { Connector } from "../../src/connectors/types.js";
 import type { AppConfig } from "./config.js";
 import type { AuditLog } from "./audit.js";
+import type { RagStore } from "./rag-store.js";
+import type { BrowseTools } from "./browse-tools.js";
 
 const run = promisify(execFile);
 
 /** Names of the in-process tools the agent loop can call. Read tools are
  * auto-allowed; mutating tools go through the approval gate (agent.ts). */
-export const READ_TOOLS = ["search_docs", "get_doc"] as const;
+export const READ_TOOLS = ["search_docs", "get_doc", "sync_docs", "browse_scroll", "browse_read", "browse_screenshot", "browse_dismiss_popups"] as const;
+export const BROWSE_GATED_TOOLS = ["browse_open", "browse_click", "browse_type"] as const;
 export const MUTATING_TOOLS = ["github_create_issue"] as const;
 export const SERVER_NAME = "kit";
 export const qualified = (n: string) => `mcp__${SERVER_NAME}__${n}`;
@@ -19,6 +22,8 @@ export type ToolsDeps = {
   connectors: Connector[];
   config: AppConfig;
   audit: AuditLog;
+  ragStore?: RagStore;
+  browse?: BrowseTools;
 };
 
 /** The kit's capabilities, exposed to the Claude Agent SDK loop as an
@@ -28,6 +33,7 @@ export type ToolResult = { content: { type: "text"; text: string }[]; isError?: 
 export type ToolHandlers = {
   searchDocs: (args: { query: string; limit?: number }) => Promise<ToolResult>;
   getDoc: (args: { id: string }) => Promise<ToolResult>;
+  syncDocs: () => Promise<ToolResult>;
   createIssue: (args: { repo: string; title: string; body: string }) => Promise<ToolResult>;
 };
 
@@ -37,8 +43,20 @@ export function buildToolHandlers(deps: ToolsDeps): ToolHandlers {
   return {
     async searchDocs(args) {
       const limit = args.limit ?? 8;
+      // Ranked RAG retrieval when the index has content; live connector
+      // substring search as fallback until the first sync runs.
+      if (deps.ragStore && deps.ragStore.rag.count() > 0) {
+        const ranked = await deps.ragStore.rag.retrieve(args.query, limit);
+        if (ranked.length) {
+          audit.write("tool_call", { tool: "search_docs", query: args.query, hits: ranked.length, via: "rag" });
+          const text = ranked.map((r: any) => `SOURCE: ${r.source}\nSCORE: ${r.score.toFixed(3)}\n${r.text.slice(0, 600)}`).join("\n\n---\n\n");
+          return { content: [{ type: "text" as const, text }] };
+        }
+        // RAG missed (its exact-shared-token guard is strict) - fall through
+        // to the live connector scan instead of returning empty.
+      }
       const hits = (await Promise.all(connectors.map((c) => c.search(args.query, limit).catch(() => [])))).flat().slice(0, limit);
-      audit.write("tool_call", { tool: "search_docs", query: args.query, hits: hits.length });
+      audit.write("tool_call", { tool: "search_docs", query: args.query, hits: hits.length, via: "connector-scan" });
       const text = hits.length
         ? hits.map((h) => `ID: ${h.id}\nTITLE: ${h.title}${h.url ? `\nURL: ${h.url}` : ""}\n${h.body.slice(0, 600)}`).join("\n\n---\n\n")
         : "No matching documents.";
@@ -54,6 +72,13 @@ export function buildToolHandlers(deps: ToolsDeps): ToolHandlers {
       }
       audit.write("tool_call", { tool: "get_doc", id: args.id, found: false });
       return { content: [{ type: "text" as const, text: `No document with ID ${args.id}.` }], isError: true };
+    },
+    async syncDocs() {
+      if (!deps.ragStore) return { content: [{ type: "text" as const, text: "RAG store not configured." }], isError: true };
+      const fromRoot = await deps.ragStore.syncDocsRoot(config.docsRoot).catch((e) => -1);
+      const fromConns = await deps.ragStore.syncConnectors(connectors).catch(() => -1);
+      audit.write("tool_call", { tool: "sync_docs", fromRoot, fromConns, chunks: deps.ragStore.rag.count() });
+      return { content: [{ type: "text" as const, text: `Index rebuilt: ${fromRoot} docs from ${config.docsRoot}, ${fromConns} from connectors; ${deps.ragStore.rag.count()} chunks total.` }] };
     },
     async createIssue(args) {
       audit.write("tool_call", { tool: "github_create_issue", repo: args.repo, title: args.title, dryRun: config.dryRun });
@@ -82,6 +107,13 @@ export function buildKitServer(deps: ToolsDeps) {
     handlers.getDoc,
   );
 
+  const syncDocs = tool(
+    "sync_docs",
+    "Re-index the configured document sources into the local ranked index. Local-only effect; safe to call when answers seem stale or the index is empty.",
+    {},
+    handlers.syncDocs,
+  );
+
   const createIssue = tool(
     "github_create_issue",
     "MUTATING: create a GitHub issue. Always requires human approval through the permission gate. Simulates unless the app is armed with SDK_APP_DRY_RUN=0.",
@@ -90,5 +122,17 @@ export function buildKitServer(deps: ToolsDeps) {
     { annotations: { destructiveHint: true } },
   );
 
-  return createSdkMcpServer({ name: SERVER_NAME, version: "0.1.0", tools: [searchDocs, getDoc, createIssue] });
+  const browseTools = deps.browse
+    ? [
+        tool("browse_open", "Navigate the browser to a URL. Out-of-allowlist hosts require human approval.", { url: z.string().url() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.open(a.url) }] })),
+        tool("browse_click", "Click an element by its visible text. Irreversible labels (buy/pay/delete/...) require human approval.", { target: z.object({ text: z.string() }) }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.click(a.target) }] })),
+        tool("browse_type", "Type text into a field identified by its label.", { target: z.object({ text: z.string() }), text: z.string(), pressEnter: z.boolean().optional() }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.type(a.target, a.text, a.pressEnter) }] })),
+        tool("browse_scroll", "Scroll the page.", { direction: z.enum(["up", "down"]) }, async (a) => ({ content: [{ type: "text" as const, text: await deps.browse!.scroll(a.direction) }] })),
+        tool("browse_read", "Read the current page: URL, title, ARIA tree and text (untrusted content, wrapped).", {}, async () => ({ content: [{ type: "text" as const, text: await deps.browse!.read() }] })),
+        tool("browse_screenshot", "Take a screenshot of the current page and return it as an image you can see.", {}, async () => ({ content: [{ type: "image" as const, data: await deps.browse!.screenshotBase64(), mimeType: "image/png" as const }] })),
+        tool("browse_dismiss_popups", "Dismiss cookie banners / overlays blocking the page.", {}, async () => { const { dismissPopups } = await import("../../src/browse/actions.js"); return { content: [{ type: "text" as const, text: "popups dismissed" }] }; }),
+      ]
+    : [];
+
+  return createSdkMcpServer({ name: SERVER_NAME, version: "0.1.0", tools: [searchDocs, getDoc, syncDocs, createIssue, ...browseTools] });
 }

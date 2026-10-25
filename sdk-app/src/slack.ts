@@ -8,21 +8,10 @@
  * Env: SLACK_BOT_TOKEN (xoxb-), SLACK_APP_TOKEN (xapp-, socket mode), plus config.ts env.
  * Approval replies in-thread: "approve <id>" / "deny <id>". */
 import { App } from "@slack/bolt";
-import { configFromEnv } from "./config.js";
-import { AuditLog } from "./audit.js";
-import { ApprovalStore } from "./approvals.js";
-import { buildKitServer } from "./tools.js";
-import { AgentCore } from "./agent.js";
-import { FilesystemConnector } from "../../src/connectors/fs.js";
-import { GitHubConnector } from "../../src/connectors/github.js";
+import { buildRuntime } from "./runtime.js";
 
 export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const config = configFromEnv(env);
-  const audit = new AuditLog(config.auditLog);
-  const approvals = new ApprovalStore(config.approvalsLog);
-  const connectors = [new FilesystemConnector(config.docsRoot)];
-  if (config.githubRepos.length) connectors.push(new GitHubConnector(config.githubRepos) as any);
-  const agent = new AgentCore({ config, mcpServer: buildKitServer({ connectors, config, audit }), approvals, audit });
+  const { config, approvals, agent } = await buildRuntime(env);
 
   const bolt = new App({ token: env.SLACK_BOT_TOKEN, appToken: env.SLACK_APP_TOKEN, socketMode: true });
 
@@ -37,7 +26,7 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     if (m) {
       // Named approvers only (kit RBAC carried over): SDK_APP_APPROVERS is a
       // comma-separated list of Slack user IDs. Anyone else is ignored.
-      const approvers = (env.SDK_APP_APPROVERS || "").split(",").map((x) => x.trim()).filter(Boolean);
+      const approvers = config.approvers;
       if (!approvers.length || !approvers.includes(event.user ?? "")) {
         await sayThread("You are not a named approver for this app.");
         return;

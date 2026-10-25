@@ -5,7 +5,8 @@ import type { Options, SDKMessage, PermissionResult } from "@anthropic-ai/claude
 import type { AppConfig } from "./config.js";
 import type { ApprovalStore } from "./approvals.js";
 import type { AuditLog } from "./audit.js";
-import { qualified, READ_TOOLS, MUTATING_TOOLS, SERVER_NAME } from "./tools.js";
+import { qualified, READ_TOOLS, MUTATING_TOOLS, BROWSE_GATED_TOOLS, SERVER_NAME } from "./tools.js";
+import { browseGateDecision, type BrowsePolicy } from "./browse-tools.js";
 
 /** Injectable so unit tests run without paid API calls. Matches query()'s shape. */
 export type QueryFn = (args: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
@@ -43,6 +44,7 @@ export class AgentCore {
       approvals: ApprovalStore;
       audit: AuditLog;
       queryFn?: QueryFn;
+      browsePolicy?: BrowsePolicy;
     },
   ) {
     this.sessionsFile = deps.config.auditLog.replace(/[^/]+$/, "sessions.json");
@@ -69,6 +71,32 @@ export class AgentCore {
     audit.write("message_in", { text: userText.slice(0, 500) }, threadKey);
 
     const canUseTool = async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
+      // Browse guardrails (kit semantics): out-of-allowlist hosts and
+      // irreversible clicks need a human; host approvals persist.
+      if (this.deps.browsePolicy && (BROWSE_GATED_TOOLS as readonly string[]).some((b) => toolName === qualified(b))) {
+        const d = browseGateDecision(this.deps.browsePolicy, toolName, input);
+        if (d.kind === "gate-host") {
+          const summary = `add ${d.host} to the browse allowlist and navigate there`;
+          const { req, decision } = approvals.request(toolName, input, summary, threadKey);
+          audit.write("approval_requested", { id: req.id, tool: toolName, summary }, threadKey);
+          handlers.onApprovalNeeded?.(req.id, summary);
+          const ok = await decision;
+          audit.write("approval_resolved", { id: req.id, approved: ok }, threadKey);
+          if (!ok) return { behavior: "deny", message: `Human refused to allowlist ${d.host} (approval ${req.id}). Do not retry.` };
+          this.deps.browsePolicy.addHost(d.host);
+          return { behavior: "allow", updatedInput: input };
+        }
+        if (d.kind === "gate-irreversible") {
+          const summary = `IRREVERSIBLE click: "${d.label}" - approve this single click`;
+          const { req, decision } = approvals.request(toolName, input, summary, threadKey);
+          audit.write("approval_requested", { id: req.id, tool: toolName, summary }, threadKey);
+          handlers.onApprovalNeeded?.(req.id, summary);
+          const ok = await decision;
+          audit.write("approval_resolved", { id: req.id, approved: ok }, threadKey);
+          return ok ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: `Human denied the irreversible click "${d.label}" (${req.id}). Do not retry.` };
+        }
+        return { behavior: "allow", updatedInput: input };
+      }
       if ((MUTATING_TOOLS as readonly string[]).some((m) => toolName === qualified(m))) {
         const summary = `${toolName}(${Object.entries(input).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(", ")})`;
         const { req, decision } = approvals.request(toolName, input, summary, threadKey);

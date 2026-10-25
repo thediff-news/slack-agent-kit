@@ -16,6 +16,12 @@ export type AppConfig = {
   dryRun: boolean;
   /** Extra env passed to SDK sessions (e.g. ANTHROPIC_BASE_URL for the budget proxy). */
   sessionEnv: Record<string, string>;
+  /** Ranked index DB path. */
+  ragDb: string;
+  /** Seed hosts for the browse allowlist (persisted file wins once written). */
+  browseAllowlist: string[];
+  /** Named approvers (Slack user IDs) for the Slack surface. */
+  approvers: string[];
 };
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -27,6 +33,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     approvalsLog: env.SDK_APP_APPROVALS_LOG || "sdk-app/state/approvals.jsonl",
     maxTurnsPerMessage: Number(env.SDK_APP_MAX_TURNS) || 8,
     dryRun: env.SDK_APP_DRY_RUN !== "0",
+    ragDb: env.SDK_APP_RAG_DB || "sdk-app/state/rag.db",
+    browseAllowlist: (env.SDK_APP_BROWSE_ALLOWLIST || "").split(",").map((x) => x.trim()).filter(Boolean),
+    approvers: (env.SDK_APP_APPROVERS || "").split(",").map((x) => x.trim()).filter(Boolean),
     sessionEnv: {
       ...(env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY } : {}),
       ...(env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL } : {}),
