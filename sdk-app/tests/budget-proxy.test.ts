@@ -8,12 +8,12 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { startBudgetProxy, extractUsage, settledCostUsd } from "../budget-proxy.mjs";
 
-type Mode = "json" | "sse" | "nousage" | "huge" | "sse-gzip" | "sse-truncated";
+type Mode = "json" | "sse" | "nousage" | "huge" | "huge-hi" | "sse-gzip" | "sse-truncated";
 async function mockUpstream(mode: Mode = "json"): Promise<{ port: number; close: () => void }> {
   const server = http.createServer((req, res) => {
     if (req.url === "/v1/messages/count_tokens") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ input_tokens: 1000 }));
+      res.end(JSON.stringify({ input_tokens: mode === "huge-hi" ? 100000 : 1000 }));
       return;
     }
     if (mode === "sse") {
@@ -45,7 +45,7 @@ async function mockUpstream(mode: Mode = "json"): Promise<{ port: number; close:
       res.end(JSON.stringify({ id: "msg_1" }));
       return;
     }
-    if (mode === "huge") {
+    if (mode === "huge" || mode === "huge-hi") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ id: "msg_1", usage: { input_tokens: 100000, output_tokens: 4096 } }));
       return;
@@ -198,4 +198,36 @@ test("extractUsage: SSE message_start keeps cache classes separate", () => {
     "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n";
   const u = extractUsage(sse)!;
   assert.deepEqual(u, { input: 100, cacheWrite: 400, cacheRead: 20000, output: 50 });
+});
+
+test("budget proxy: tiered model reserves at the HIGH tier but settles by ACTUAL prompt size", async () => {
+  const up = await mockUpstream("json"); // usage: 1000 in / 10 out (under threshold)
+  const statePath = join(mkdtempSync(join(tmpdir(), "bp-tier-")), "ledger.json");
+  const p = await startBudgetProxy(cfg(up.port, {
+    model: "claude-sonnet-5-5,claude-haiku-5-5",
+    rates: { "claude-haiku-5-5": { input: 0.10, output: 0.50, highInput: 0.50, highOutput: 2.50 } },
+    statePath,
+  }));
+  const r = await post(p.port, "/v1/messages", { model: "claude-haiku-5-5", max_tokens: 4096, messages: [{ role: "user", content: "hi" }] });
+  assert.equal(r.status, 200);
+  await settle();
+  // small actual prompt -> LOW tier settle: 1000*0.10/M + 10*0.50/M
+  const spent = p.spentBoundUsd();
+  assert.ok(Math.abs(spent - 0.000105) < 1e-9, `settled ${spent} at low tier`);
+  p.close(); up.close();
+});
+
+test("budget proxy: tiered model settles at the HIGH tier when the actual prompt crosses the threshold", async () => {
+  const up = await mockUpstream("huge-hi"); // count AND usage both 100000 in (self-consistent)
+  const p = await startBudgetProxy(cfg(up.port, {
+    model: "claude-sonnet-5-5,claude-haiku-5-5",
+    rates: { "claude-haiku-5-5": { input: 0.10, output: 0.50, highInput: 0.50, highOutput: 2.50 } },
+  }));
+  const r = await post(p.port, "/v1/messages", { model: "claude-haiku-5-5", max_tokens: 4096, messages: [{ role: "user", content: "hi" }] });
+  assert.equal(r.status, 200);
+  await settle();
+  // 100000 actual input >= threshold -> HIGH tier: 100000*0.50/M + 4096*2.50/M
+  const spent = p.spentBoundUsd();
+  assert.ok(Math.abs(spent - 0.06024) < 1e-9, `settled ${spent} at high tier`);
+  p.close(); up.close();
 });
