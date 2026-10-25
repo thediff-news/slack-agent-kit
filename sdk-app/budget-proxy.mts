@@ -29,7 +29,8 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 import { once } from "node:events";
-import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 export interface ProxyConfig {
   totalUsd: number;        // hard cumulative bound, e.g. 1.90
@@ -198,6 +199,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
     } catch { /* no ledger yet - starts at 0 */ }
   }
   const basis = cfg.basisUsd ?? 0;
+  if (cfg.statePath) mkdirSync(dirname(cfg.statePath), { recursive: true });
   const persist = () => {
     if (!cfg.statePath) return;
     const tmp = cfg.statePath + ".tmp";

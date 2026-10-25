@@ -201,3 +201,17 @@ test("budget proxy: model allowlist with per-model verified prices; unpriced mod
     upstream.close();
   }
 });
+
+test("render-only fallback matches VISIBLE text only - hidden elements cannot false-pass a claim", async () => {
+  const { tools, dir } = fixture();
+  writeFileSync(join(dir, "test", "render.js"),
+    'require("node:fs").writeFileSync("render.html", \'<html><body><div>Globex Net $144.00</div><div style="display:none">Hidden Net $999.00</div><script>/* script Net $777.00 */</script></body></html>\');\n');
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fix", scripts: { test: "node test/run.js", render: "node test/render.js" } }));
+  const shot = await tools.screenshotEvidence("owner/name", "npm run render", "render.html");
+  assert.ok(existsSync(shot.path));
+  // hidden (display:none) and script content are NOT on the rendered page as visible text
+  assert.match(await tools.recordUiState("owner/name", "after", "Hidden Net $999.00", "hidden value"), /^REJECTED: your claimed observation/);
+  assert.match(await tools.recordUiState("owner/name", "after", "script Net $777.00", "script source"), /^REJECTED: your claimed observation/);
+  assert.match(await tools.recordUiState("owner/name", "after", "Globex Net $144.00", "visible total"), /^verified:/);
+  await tools.close();
+});

@@ -448,8 +448,20 @@ export class FactoryTools {
       if (servedHere) { pageText = ps.text; where = `live page ${ps.url}`; }
     }
     if (!pageText && this.lastRenderHtml && existsSync(this.lastRenderHtml) && this.lastRenderHtml.startsWith(dir)) {
-      pageText = readFileSync(this.lastRenderHtml, "utf8");
-      where = `rendered ${this.lastRenderHtml.slice(dir.length + 1)}`;
+      // Same visibility semantics as the live-page path: rendered VISIBLE text
+      // (body.innerText), not raw HTML - hidden elements must not false-pass a claim.
+      try {
+        const { chromium } = await import("playwright");
+        const browser = await chromium.launch({ headless: true });
+        try {
+          const page = await browser.newPage();
+          await page.goto(`file://${this.lastRenderHtml}`);
+          pageText = await page.locator("body").innerText({ timeout: 5_000 });
+        } finally {
+          await browser.close();
+        }
+      } catch { pageText = ""; }
+      if (pageText) where = `rendered ${this.lastRenderHtml.slice(dir.length + 1)}`;
     }
     if (!pageText) return "BLOCKED: the app cannot independently see the UI state: open the served page in the browser (browse_open on the factory_serve URL) or run factory_screenshot first.";
     const norm = (t: string) => t.replace(/\s+/g, " ");
