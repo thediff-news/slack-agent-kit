@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, SDKMessage, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { AppConfig } from "./config.js";
@@ -28,6 +30,11 @@ Rules:
  * harness) only renders text and collects approval decisions. */
 export class AgentCore {
   private sessions = new Map<string, string>();
+  private sessionsFile: string;
+  /** Per-thread turn serialization: one in-flight query per conversation
+   * thread, so no surface can run two concurrent turns on one SDK session
+   * (the CLI harness also queues; this protects every surface). */
+  private turns = new Map<string, Promise<void>>();
 
   constructor(
     private deps: {
@@ -37,10 +44,26 @@ export class AgentCore {
       audit: AuditLog;
       queryFn?: QueryFn;
     },
-  ) {}
+  ) {
+    this.sessionsFile = deps.config.auditLog.replace(/[^/]+$/, "sessions.json");
+    mkdirSync(dirname(this.sessionsFile), { recursive: true });
+    if (existsSync(this.sessionsFile)) {
+      for (const [k, v] of Object.entries(JSON.parse(readFileSync(this.sessionsFile, "utf8")))) {
+        this.sessions.set(k, String(v));
+      }
+    }
+  }
 
-  /** Handle one user message; resolves when the turn (and any gated tool decisions) completes. */
+  /** Handle one user message; resolves when the turn (and any gated tool decisions) completes.
+   * Concurrent calls for the same thread queue in arrival order. */
   async chat(threadKey: string, userText: string, handlers: ChatHandlers = {}): Promise<void> {
+    const prior = this.turns.get(threadKey) ?? Promise.resolve();
+    const run = prior.then(() => this.chatInner(threadKey, userText, handlers));
+    this.turns.set(threadKey, run.catch(() => {}));
+    return run;
+  }
+
+  private async chatInner(threadKey: string, userText: string, handlers: ChatHandlers): Promise<void> {
     const { config, mcpServer, approvals, audit } = this.deps;
     const queryFn = this.deps.queryFn ?? query;
     audit.write("message_in", { text: userText.slice(0, 500) }, threadKey);
@@ -48,7 +71,7 @@ export class AgentCore {
     const canUseTool = async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
       if ((MUTATING_TOOLS as readonly string[]).some((m) => toolName === qualified(m))) {
         const summary = `${toolName}(${Object.entries(input).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(", ")})`;
-        const { req, decision } = approvals.request(toolName, input, summary);
+        const { req, decision } = approvals.request(toolName, input, summary, threadKey);
         audit.write("approval_requested", { id: req.id, tool: toolName, summary }, threadKey);
         handlers.onApprovalNeeded?.(req.id, summary);
         const approved = await decision;
@@ -81,8 +104,9 @@ export class AgentCore {
 
     try {
       for await (const msg of queryFn({ prompt: userText, options })) {
-        if ((msg as any).session_id && !this.sessions.has(threadKey)) {
+        if ((msg as any).session_id && this.sessions.get(threadKey) !== (msg as any).session_id) {
           this.sessions.set(threadKey, (msg as any).session_id);
+          writeFileSync(this.sessionsFile, JSON.stringify(Object.fromEntries(this.sessions)));
         }
         if (msg.type === "assistant") {
           for (const block of msg.message.content as any[]) {

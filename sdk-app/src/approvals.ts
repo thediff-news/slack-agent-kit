@@ -1,18 +1,27 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 
-/** Durable-ish approval ledger: every request and every resolution is
- * appended to a JSONL log, so pending approvals survive a restart and each
- * request resolves exactly once (kit semantics, rebuilt for the SDK app).
- * Slack/CLI surfaces call resolve(); the SDK canUseTool gate awaits it. */
+/** Approval ledger (JSONL, append-only). A request binds:
+ *  - the exact tool + payload (sha256 of the canonical input), so a retried
+ *    tool call with a changed payload needs a NEW approval;
+ *  - the conversation thread it was requested in - a resolution from any
+ *    other thread is rejected;
+ *  - the resolver's identity (surface-checked: Slack adapter enforces the
+ *    named-approver allowlist; the CLI harness is the local owner).
+ *  Each request resolves exactly once; pending requests survive restart. */
 export type ApprovalRequest = {
   id: string;
   tool: string;
   summary: string;
   input: Record<string, unknown>;
+  payloadHash: string;
+  thread: string;
   createdAt: string;
 };
+
+export const payloadHashOf = (input: Record<string, unknown>): string =>
+  createHash("sha256").update(JSON.stringify(input, Object.keys(input).sort())).digest("hex");
 
 type LogRow =
   | { type: "requested"; req: ApprovalRequest }
@@ -25,36 +34,44 @@ export class ApprovalStore {
   constructor(private logPath: string) {
     mkdirSync(dirname(logPath), { recursive: true });
     if (existsSync(logPath)) {
-      const resolved = new Set<string>();
       for (const line of readFileSync(logPath, "utf8").split("\n")) {
         if (!line.trim()) continue;
         const row = JSON.parse(line) as LogRow;
         if (row.type === "requested") this.pending.set(row.req.id, row.req);
-        else { this.pending.delete(row.id); resolved.add(row.id); }
+        else this.pending.delete(row.id);
       }
     }
   }
 
-  /** Register a new approval request; await the returned promise for the human decision. */
-  request(tool: string, input: Record<string, unknown>, summary: string): { req: ApprovalRequest; decision: Promise<boolean> } {
-    const req: ApprovalRequest = { id: randomUUID().slice(0, 8), tool, summary, input, createdAt: new Date().toISOString() };
+  request(tool: string, input: Record<string, unknown>, summary: string, thread: string): { req: ApprovalRequest; decision: Promise<boolean> } {
+    const req: ApprovalRequest = {
+      id: randomUUID().slice(0, 8), tool, summary, input,
+      payloadHash: payloadHashOf(input), thread, createdAt: new Date().toISOString(),
+    };
     this.append({ type: "requested", req });
     this.pending.set(req.id, req);
     const decision = new Promise<boolean>((res) => this.waiters.set(req.id, res));
     return { req, decision };
   }
 
-  /** Resolve exactly once. Returns false when the id is unknown or already resolved. */
-  resolve(id: string, approved: boolean, resolver: string): boolean {
-    if (!this.pending.has(id)) return false;
+  /** Resolve exactly once, and only from the thread the request was made in.
+   * Returns "resolved" | "unknown" | "wrong-thread". */
+  resolve(id: string, approved: boolean, resolver: string, fromThread?: string): "resolved" | "unknown" | "wrong-thread" {
+    const req = this.pending.get(id);
+    if (!req) return "unknown";
+    if (fromThread !== undefined && fromThread !== req.thread) return "wrong-thread";
     this.pending.delete(id);
     this.append({ type: "resolved", id, approved, resolver, at: new Date().toISOString() });
     this.waiters.get(id)?.(approved);
     this.waiters.delete(id);
-    return true;
+    return "resolved";
   }
 
-  /** Pending requests, e.g. resurfaced after a restart. */
+  /** Re-check that a payload still matches what was approved (ledger audit). */
+  payloadMatches(id: string, input: Record<string, unknown>): boolean {
+    return this.pending.get(id)?.payloadHash === payloadHashOf(input);
+  }
+
   list(): ApprovalRequest[] {
     return [...this.pending.values()];
   }

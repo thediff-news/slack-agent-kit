@@ -35,8 +35,17 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
 
     const m = /^(approve|deny)\s+(\S+)$/i.exec(text);
     if (m) {
-      const ok = approvals.resolve(m[2], m[1].toLowerCase() === "approve", event.user ?? "slack-user");
-      await sayThread(ok ? `${m[1]}ed ${m[2]}.` : `No pending approval ${m[2]}.`);
+      // Named approvers only (kit RBAC carried over): SDK_APP_APPROVERS is a
+      // comma-separated list of Slack user IDs. Anyone else is ignored.
+      const approvers = (env.SDK_APP_APPROVERS || "").split(",").map((x) => x.trim()).filter(Boolean);
+      if (!approvers.length || !approvers.includes(event.user ?? "")) {
+        await sayThread("You are not a named approver for this app.");
+        return;
+      }
+      // Thread binding: the decision must come from the same Slack thread the
+      // request was made in - nobody can approve from another channel/DM.
+      const r = approvals.resolve(m[2], m[1].toLowerCase() === "approve", event.user ?? "slack-user", threadKey);
+      await sayThread(r === "resolved" ? `${m[1]}ed ${m[2]}.` : r === "wrong-thread" ? `Approval ${m[2]} belongs to another conversation.` : `No pending approval ${m[2]}.`);
       return;
     }
     await agent.chat(threadKey, text, {

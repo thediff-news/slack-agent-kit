@@ -60,3 +60,17 @@ test("kit MCP server builds with all three tools registered", () => {
   assert.ok(server, "server instance exists");
   assert.equal(server.type, "sdk");
 });
+
+test("ARMED github_create_issue executes gh (controlled local fixture, no GitHub)", async () => {
+  const { handlers } = setup(false); // SDK_APP_DRY_RUN=0
+  const oldPath = process.env.PATH;
+  process.env.PATH = `/tmp/fake-bin:${oldPath}`;
+  try {
+    const r = await handlers.createIssue({ repo: "o/r", title: "Armed test", body: "armed body" });
+    assert.match(r.content[0].text, /Issue created: https:\/\/github.com\/thediff-news\/slack-agent-kit\/issues\/999/);
+    const { readFileSync } = await import("node:fs");
+    assert.match(readFileSync("/tmp/fake-gh-calls.log", "utf8"), /issue create --repo o\/r --title Armed test --body armed body/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
