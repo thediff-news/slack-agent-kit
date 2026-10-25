@@ -71,3 +71,17 @@ test("REAL isolation probe: files outside the clone do not exist inside bwrap", 
   const out = execFileSync(inv.file, args, { stdio: "pipe" }).toString();
   assert.match(out, /False/);
 });
+
+test("eval lockdown: local-path clones are rejected", async () => {
+  const { FactoryTools } = await import("../src/factory-tools.js");
+  const { configFromEnv } = await import("../src/config.js");
+  const { AuditLog } = await import("../src/audit.js");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "lockdown-clone-"));
+  const config = configFromEnv({ SDK_APP_AUDIT_LOG: join(dir, "audit.jsonl"), SDK_APP_GITHUB_REPOS: "org/eval-repo", SDK_APP_EVAL_LOCKDOWN: "1" } as any);
+  const f = new FactoryTools({ config, audit: new AuditLog(join(dir, "audit.jsonl")) });
+  const r = await f.clone("/tmp/sak");
+  assert.match(r, /BLOCKED: \/tmp\/sak is not in the repo allowlist/);
+});

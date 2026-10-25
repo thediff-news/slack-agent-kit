@@ -113,7 +113,8 @@ export class FactoryTools {
 
   /** repo is "owner/name" (cloned via gh, must be in SDK_APP_GITHUB_REPOS) or an absolute local path (tests/fixtures). */
   async clone(repo: string, ref?: string, turnCtx?: { threadKey?: string; hasImages?: boolean }): Promise<string> {
-    const allowed = this.deps.config.githubRepos.includes(repo) || repo.startsWith("/");
+    // eval lockdown: local paths are out of the eval boundary - allowlisted remotes only
+    const allowed = this.deps.config.githubRepos.includes(repo) || (!this.deps.config.evalLockdown && repo.startsWith("/"));
     if (!allowed) return `BLOCKED: ${repo} is not in the repo allowlist (SDK_APP_GITHUB_REPOS). Ask a human to add it.`;
     if (this.deps.config.evalLockdown) {
       // fail closed: eval runs are not "blind" without OS-level isolation
