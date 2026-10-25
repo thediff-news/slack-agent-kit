@@ -36,6 +36,16 @@ export class AgentCore {
    * thread, so no surface can run two concurrent turns on one SDK session
    * (the CLI harness also queues; this protects every surface). */
   private turns = new Map<string, Promise<void>>();
+  private aborts = new Map<string, AbortController>();
+
+  /** Abort the in-flight turn for a thread, if any. Returns true when a turn
+   * was actually cancelled. */
+  cancel(threadKey: string): boolean {
+    const ac = this.aborts.get(threadKey);
+    if (!ac || ac.signal.aborted) return false;
+    ac.abort();
+    return true;
+  }
 
   constructor(
     private deps: {
@@ -72,6 +82,8 @@ export class AgentCore {
     const { config, approvals, audit } = this.deps;
     const mcpServer = this.deps.mcpServerFactory ? this.deps.mcpServerFactory({ threadKey, ...ctx }) : this.deps.mcpServer!;
     const queryFn = this.deps.queryFn ?? query;
+    const ac = new AbortController();
+    this.aborts.set(threadKey, ac);
     // Identity tier: only an enrolled identity (operator CLI, or a Slack user
     // bound in SDK_APP_USER_ACLS / SDK_APP_APPROVERS) may touch factory,
     // browser or write capabilities. Unknown Slack users get public docs only.
@@ -164,6 +176,7 @@ export class AgentCore {
       maxTurns: config.maxTurnsPerMessage,
       cwd: process.cwd(),
       env: config.sessionEnv,
+      abortController: ac,
       ...(this.sessions.has(threadKey) ? { resume: this.sessions.get(threadKey)! } : {}),
     };
 
@@ -190,8 +203,14 @@ export class AgentCore {
         }
       }
     } catch (e) {
+      if (ac.signal.aborted) {
+        audit.write("turn_cancelled", {}, threadKey);
+        return;
+      }
       audit.write("error", { message: String(e).slice(0, 300) }, threadKey);
       throw e;
+    } finally {
+      this.aborts.delete(threadKey);
     }
   }
 

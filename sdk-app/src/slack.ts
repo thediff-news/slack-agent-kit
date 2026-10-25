@@ -10,6 +10,31 @@
 import { App } from "@slack/bolt";
 import { buildRuntime } from "./runtime.js";
 
+/** Slack renders badly past ~4k chars; split long answers on paragraph, then
+ * line, then hard boundaries. Exported for tests. */
+export function chunkText(text: string, max = 3500): string[] {
+  if (text.length <= max) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf("\n\n", max);
+    if (cut < max / 2) cut = rest.lastIndexOf("\n", max);
+    if (cut < max / 2) cut = max;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, "");
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+/** User-facing error rendering; exported for tests. */
+export function renderError(err: unknown): string {
+  const m = String((err as any)?.message ?? err);
+  if (/budget|429|cap/i.test(m)) return "I hit the spending cap for this app, so I stopped before finishing. An admin can raise it.";
+  if (/timeout|timed out/i.test(m)) return "That took too long and I stopped it. Try a narrower request.";
+  return "Something went wrong on my side while working on that. The details are in the audit log.";
+}
+
 export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const { config, approvals, agent } = await buildRuntime(env);
 
@@ -20,8 +45,18 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     const thread = event.thread_ts ?? event.ts;
     const threadKey = `${event.channel}:${thread}`;
     const text: string = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
-    const sayThread = (message: string) => say({ text: message, thread_ts: thread });
+    const sayThread = async (message: string) => {
+      for (const chunk of chunkText(message)) await say({ text: chunk, thread_ts: thread });
+    };
 
+    if (/^(stop|cancel)$/i.test(text)) {
+      await sayThread(agent.cancel(threadKey) ? "Stopped the current turn." : "Nothing is running in this thread.");
+      return;
+    }
+    if (!text) {
+      await sayThread("Ask me something - I can search docs, browse approved sites, and work on the repo. Writes always ask first.");
+      return;
+    }
     const m = /^(approve|deny)\s+(\S+)$/i.exec(text);
     if (m) {
       // Named approvers only (kit RBAC carried over): SDK_APP_APPROVERS is a
@@ -36,10 +71,14 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
       await sayThread(r === "resolved" ? `${m[1]}ed ${m[2]}.` : r === "wrong-thread" ? `Approval ${m[2]} belongs to another conversation.` : `No pending approval ${m[2]}.`);
       return;
     }
-    await agent.chat(threadKey, text, {
-      onText: (t) => { void sayThread(t); },
-      onApprovalNeeded: (id, summary) => { void sayThread(`Approval needed (${id}): ${summary}\nReply in thread: approve ${id} / deny ${id}`); },
-    }, { userId: event.user, surface: "slack", channelId: event.channel });
+    try {
+      await agent.chat(threadKey, text, {
+        onText: (t) => { void sayThread(t); },
+        onApprovalNeeded: (id, summary) => { void sayThread(`Approval needed (${id}): ${summary}\nReply in thread: approve ${id} / deny ${id}`); },
+      }, { userId: event.user, surface: "slack", channelId: event.channel });
+    } catch (err) {
+      await sayThread(renderError(err));
+    }
   };
 
   bolt.event("app_mention", async ({ event, say }) => handle(event, say));
