@@ -181,7 +181,7 @@ export function settledCostUsd(u: MeasuredUsage, cfg: Pick<ProxyConfig, "inputRa
 
 /** One upstream request, direct or CONNECT-tunneled through the srt proxy.
  *  Returns the raw response so SSE streams pass through untouched. */
-async function upstreamRaw(cfg: ProxyConfig, path: string, body: string, method = "POST"): Promise<{ status: number; headers: http.IncomingHttpHeaders; res: http.IncomingMessage }> {
+async function upstreamRaw(cfg: ProxyConfig, path: string, body: string, method = "POST", fwdHeaders?: Record<string, string>): Promise<{ status: number; headers: http.IncomingHttpHeaders; res: http.IncomingMessage }> {
   const target = new URL(cfg.upstreamBase);
   const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || "";
   const dbg = process.env.BUDGET_PROXY_DEBUG ? console.log : () => {};
@@ -191,6 +191,11 @@ async function upstreamRaw(cfg: ProxyConfig, path: string, body: string, method 
     "x-api-key": cfg.realKey,
     "anthropic-version": "2023-06-01",
     "content-length": String(Buffer.byteLength(body)),
+    // Allowlisted client headers only (e.g. anthropic-beta): beta-gated request
+    // fields (thinking.display, output_config, context_management) are REJECTED
+    // upstream without the matching beta header - dropping it caused 400s on
+    // every fresh-session burst. Auth never comes from the client; realKey above.
+    ...(fwdHeaders ?? {}),
   };
   if (proxy && target.hostname.endsWith("anthropic.com")) {
     const p = new URL(proxy);
@@ -247,8 +252,8 @@ async function upstreamRaw(cfg: ProxyConfig, path: string, body: string, method 
   });
 }
 
-async function upstreamJson(cfg: ProxyConfig, path: string, body: string): Promise<{ status: number; body: string }> {
-  const r = await upstreamRaw(cfg, path, body);
+async function upstreamJson(cfg: ProxyConfig, path: string, body: string, fwdHeaders?: Record<string, string>): Promise<{ status: number; body: string }> {
+  const r = await upstreamRaw(cfg, path, body, "POST", fwdHeaders);
   let data = "";
   for await (const c of r.res) data += c;
   return { status: r.status, body: data };
@@ -312,10 +317,16 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       for await (const c of clientReq) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString("utf8");
       const url = clientReq.url ?? "/";
+      // Forward ONLY these allowlisted client headers upstream (never auth).
+      const fwd: Record<string, string> = {};
+      const betaH = clientReq.headers["anthropic-beta"];
+      if (typeof betaH === "string" && betaH) fwd["anthropic-beta"] = betaH;
+      const verH = clientReq.headers["anthropic-version"];
+      if (typeof verH === "string" && verH) fwd["anthropic-version"] = verH;
       if (clientReq.method !== "POST" || !url.startsWith("/v1/messages") || url === "/v1/messages/count_tokens") {
         // unbilled endpoints (models list, count_tokens): forward ungated
         console.log(`[budget-proxy] ${new Date().toISOString()} passthrough ${clientReq.method} ${url}`);
-        const r = await upstreamRaw(cfg, url, raw, clientReq.method);
+        const r = await upstreamRaw(cfg, url, raw, clientReq.method, fwd);
         console.log(`[budget-proxy] ${new Date().toISOString()} passthrough ${clientReq.method} ${url} -> ${r.status}`);
         clientRes.writeHead(r.status, r.headers);
         r.res.pipe(clientRes);
@@ -374,7 +385,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
         return v;
       };
       const countBody = JSON.stringify({ model: body.model, messages: stripForCount(body.messages), ...(body.system ? { system: stripForCount(body.system) } : {}), ...(body.tools ? { tools: stripForCount(body.tools) } : {}), ...(body.thinking ? { thinking: body.thinking } : {}) });
-      const cr = await upstreamJson(cfg, "/v1/messages/count_tokens", countBody);
+      const cr = await upstreamJson(cfg, "/v1/messages/count_tokens", countBody, fwd);
       if (cr.status !== 200) {
         journal({ ev: "gate", reqId, decision: "rejected_count", model: String(body.model ?? "") });
         clientRes.writeHead(502, { "content-type": "application/json" });
@@ -415,7 +426,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       journal({ ev: "gate", reqId, decision: "accepted", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound, cumulative_after: cumulative });
       let r: Awaited<ReturnType<typeof upstreamRaw>>;
       try {
-        r = await upstreamRaw(cfg, url, JSON.stringify(body));
+        r = await upstreamRaw(cfg, url, JSON.stringify(body), "POST", fwd);
       } catch (e) {
         releaseSlot();
         journal({ ev: "upstream_error", reqId, message: (e as Error).message.slice(0, 200) });

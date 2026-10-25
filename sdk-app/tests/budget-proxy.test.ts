@@ -451,3 +451,44 @@ test("backpressure: an unparseable upstream response (400 error body) frees its 
   assert.equal(r3.status, 200, "third request admitted: 400s released their slots");
   p.close(); server.close();
 });
+
+test("header forwarding: anthropic-beta reaches BOTH count_tokens and messages upstream; auth never comes from the client", async () => {
+  const seen: { path: string; beta?: string; apiKey?: string; auth?: string; version?: string }[] = [];
+  const server = http.createServer((req, res) => {
+    let raw = ""; req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      seen.push({ path: req.url ?? "", beta: String(req.headers["anthropic-beta"] ?? ""), apiKey: String(req.headers["x-api-key"] ?? ""), auth: String(req.headers["authorization"] ?? ""), version: String(req.headers["anthropic-version"] ?? "") });
+      if ((req.url ?? "").startsWith("/v1/messages/count_tokens")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ input_tokens: 1000 }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 2000, output_tokens: 1 } } }) + "\n\n" +
+        "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 50 } }) + "\n\n" +
+        "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n"
+      );
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const p = await startBudgetProxy(cfg((server.address() as any).port));
+  const beta = "thinking-display-updates-2026-08-18,effort-2025-11-24";
+  const r = await fetch(`http://127.0.0.1:${p.port}/v1/messages?beta=true`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "anthropic-beta": beta, "x-api-key": "client-key-must-not-leak", "authorization": "Bearer must-not-leak" },
+    body: JSON.stringify(msg),
+  });
+  assert.equal(r.status, 200);
+  const count = seen.find((s) => s.path.startsWith("/v1/messages/count_tokens"));
+  const fwd = seen.find((s) => s.path.startsWith("/v1/messages?") || s.path === "/v1/messages");
+  assert.ok(count, "count call made");
+  assert.ok(fwd, "messages call made");
+  assert.equal(count!.beta, beta, "beta header on count call");
+  assert.equal(fwd!.beta, beta, "beta header on messages call");
+  assert.ok(fwd!.path.includes("beta=true"), "query string preserved");
+  assert.notEqual(fwd!.apiKey, "client-key-must-not-leak", "client x-api-key never forwarded");
+  assert.equal(fwd!.auth, "", "client authorization never forwarded");
+  p.close(); server.close();
+});
