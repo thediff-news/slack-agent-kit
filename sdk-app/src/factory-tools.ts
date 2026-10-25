@@ -5,7 +5,7 @@
  * a PR is approval-gated + dry-run unless armed. Never merges, never
  * pushes to main. */
 import { execFile } from "node:child_process";
-import { checkEvalCommand, lockdownInvocation } from "./eval-lockdown.js";
+import { checkEvalCommand, lockdownInvocation, EVAL_SAFE_CMD, type SandboxKind } from "./eval-lockdown.js";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { dirname } from "node:path";
@@ -116,9 +116,9 @@ export class FactoryTools {
     const allowed = this.deps.config.githubRepos.includes(repo) || repo.startsWith("/");
     if (!allowed) return `BLOCKED: ${repo} is not in the repo allowlist (SDK_APP_GITHUB_REPOS). Ask a human to add it.`;
     if (this.deps.config.evalLockdown) {
-      // fail closed: eval runs are not "blind" without OS-level network isolation
-      const ok = await run("unshare", ["-Urn", "true"]).then(() => true).catch(() => false);
-      if (!ok) return "BLOCKED: eval lockdown is on but OS network namespaces are unavailable here - refusing an unisolated eval run. Run without SDK_APP_EVAL_LOCKDOWN only for non-eval work.";
+      // fail closed: eval runs are not "blind" without OS-level isolation
+      const kind = await this.sandboxKind();
+      if (kind === "none") return "BLOCKED: eval lockdown is on but no sandbox works here (bwrap/userns) - refusing an unisolated eval run. Unset SDK_APP_EVAL_LOCKDOWN only for non-eval work.";
     }
     const dir = this.cloneDir(repo);
     if (!existsSync(dir)) {
@@ -182,6 +182,14 @@ export class FactoryTools {
     const ok = await run("git", ["-C", dir, "fetch", "--quiet", "origin", ref]).then(() => true).catch(() => false);
     if (!ok) return undefined;
     return (await run("git", ["-C", dir, "rev-parse", "FETCH_HEAD"])).stdout.trim();
+  }
+
+  private _sandbox: SandboxKind | undefined;
+  private async sandboxKind(): Promise<SandboxKind> {
+    if (this._sandbox) return this._sandbox;
+    if (await run("bwrap", ["--unshare-net", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--dev-bind", "/dev", "/dev", "--tmpfs", "/tmp", "--", "true"]).then(() => true).catch(() => false)) return (this._sandbox = "bwrap");
+    if (await run("unshare", ["-Urn", "true"]).then(() => true).catch(() => false)) return (this._sandbox = "unshare");
+    return (this._sandbox = "none");
   }
 
   private async baseOf(dir: string): Promise<string> {
@@ -346,23 +354,31 @@ export class FactoryTools {
   }
 
   async runChecks(repo: string, cmd: string): Promise<string> {
-    if (!SAFE_CMD.test(cmd)) return `BLOCKED: command not in the factory allowlist (repo's own test/typecheck/build/git commands only): ${cmd}`;
+    const lockdown = this.deps.config.evalLockdown;
+    const cmdOk = lockdown ? EVAL_SAFE_CMD.test(cmd.trim()) : SAFE_CMD.test(cmd);
+    if (!cmdOk) return `BLOCKED: command not in the ${lockdown ? "eval" : "factory"} allowlist (repo's own test/typecheck/build/git commands only): ${cmd}`;
     const dir = this.cloneDir(repo);
     this.deps.audit.write("tool_call", { tool: "factory_run", repo, cmd });
     const isTest = TEST_CMD.test(cmd.trim());
     let runFile = "sh";
     let runArgs = ["-c", cmd];
-    if (this.deps.config.evalLockdown) {
+    if (lockdown) {
       const blocked = checkEvalCommand(cmd);
       if (blocked) {
         this.deps.audit.write("tool_call", { tool: "factory_run", repo, cmd, refused: "eval-lockdown" });
         return `BLOCKED: ${blocked}`;
       }
-      const script = join(this.workRoot, `.eval-check-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.sh`);
-      writeFileSync(script, `#!/bin/sh\nip link set lo up 2>/dev/null || true\nexec sh -c ${JSON.stringify(cmd)}\n`);
-      const inv = lockdownInvocation(cmd, script);
+      const kind = await this.sandboxKind();
+      if (kind === "none") {
+        this.deps.audit.write("tool_call", { tool: "factory_run", repo, cmd, refused: "eval-lockdown-no-sandbox" });
+        return "BLOCKED: eval lockdown needs a sandbox (bwrap or user namespaces) and none works here - refusing an unisolated eval command. Unset SDK_APP_EVAL_LOCKDOWN only for non-eval work.";
+      }
+      // the command goes to sh -c as ONE argv element - no script file,
+      // which would have to live inside the sandboxed mount set anyway
+      const inv = lockdownInvocation(cmd, dir, kind);
       runFile = inv.file;
       runArgs = inv.args;
+      this.deps.audit.write("tool_call", { tool: "factory_run", repo, sandbox: kind });
     }
     const record = async (exitCode: number) => {
       if (!isTest) return;
