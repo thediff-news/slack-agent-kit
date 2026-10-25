@@ -142,3 +142,16 @@ test("eval lockdown: fresh clones get NO node_modules toolchain symlink", async 
   const { existsSync, lstatSync } = await import("node:fs");
   assert.ok(!existsSync(join(fake, "node_modules")) || !lstatSync(join(fake, "node_modules")).isSymbolicLink(), "no symlink under eval lockdown");
 });
+
+test("lockdown command surface: npm ci allowed (lockfile-pure offline install), npm install/add still banned", () => {
+  assert.equal(checkEvalCommand("npm ci --offline"), undefined);
+  assert.ok(EVAL_SAFE_CMD.test("npm ci --offline"));
+  assert.match(checkEvalCommand("npm install lodash")!, /not available/);
+  assert.match(checkEvalCommand("npm i")!, /not available/);
+  assert.match(checkEvalCommand("npm add x")!, /not available/);
+});
+
+test("lockdown command surface: npm run test-backend and similar test scripts allowed", () => {
+  assert.ok(EVAL_SAFE_CMD.test("npm run test-backend"));
+  assert.ok(EVAL_SAFE_CMD.test("npm test"));
+});

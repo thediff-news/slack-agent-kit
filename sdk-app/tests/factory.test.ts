@@ -149,3 +149,32 @@ test("createPr source pins the head branch and scoped gh credential helper (stat
   assert.equal((s.match(/\.\.\.GH_CRED, "push"/g) ?? []).length, 2);
   assert.doesNotMatch(s, /x-access-token|ghp_|https:\/\/[^\s"']*@github/);
 });
+
+test("detectLaunch: lockfile picks the package manager, script order dev > start:dev > start", () => {
+  const { src, f } = fixture();
+  writeFileSync(join(src, "package.json"), JSON.stringify({ scripts: { start: "node server.js", dev: "node dev.js" } }));
+  let r = f.detectLaunch(src);
+  assert.deepEqual(r, { pm: "npm", script: "dev", cmd: "npm run dev" });
+  writeFileSync(join(src, "package-lock.json"), "{}");
+  r = f.detectLaunch(src);
+  assert.deepEqual(r, { pm: "npm", script: "dev", cmd: "npm run dev" });
+  writeFileSync(join(src, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  r = f.detectLaunch(src);
+  assert.deepEqual(r, { pm: "corepack pnpm", script: "dev", cmd: "corepack pnpm run dev" });
+  writeFileSync(join(src, "package.json"), JSON.stringify({ scripts: { start: "node server.js" } }));
+  r = f.detectLaunch(src);
+  assert.deepEqual(r, { pm: "corepack pnpm", script: "start", cmd: "corepack pnpm run start" });
+});
+
+test("detectLaunch: script override validated against package.json, no-script error lists options", () => {
+  const { src, f } = fixture();
+  writeFileSync(join(src, "package.json"), JSON.stringify({ scripts: { "start:frontend": "vite", build: "tsc" } }));
+  const ok = f.detectLaunch(src, "start:frontend");
+  assert.deepEqual(ok, { pm: "npm", script: "start:frontend", cmd: "npm run start:frontend" });
+  const bad = f.detectLaunch(src, "start; rm -rf /");
+  assert.ok("error" in bad && /invalid script name/.test(bad.error));
+  const missing = f.detectLaunch(src, "dev");
+  assert.ok("error" in missing && /no script "dev"/.test(missing.error));
+  const none = f.detectLaunch(src);
+  assert.ok("error" in none && /no dev\/start script/.test(none.error));
+});

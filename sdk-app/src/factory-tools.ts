@@ -441,46 +441,78 @@ export class FactoryTools {
 
   private appServers = new Map<string, { url: string; child: ChildProcess }>();
 
+  /** Generic README-derived launch support (replaces the fixed pnpm template):
+   * detect the package manager from the lockfile and the launch script from
+   * package.json ("dev" > "start:dev" > "start"), exactly as the repo's own
+   * README instructs. No per-case hardcoding; the agent may override the
+   * script name only (validated against package.json). */
+  detectLaunch(root: string, scriptOverride?: string): { pm: string; script: string; cmd: string } | { error: string } {
+    const pm = existsSync(join(root, "pnpm-lock.yaml")) ? "corepack pnpm"
+      : existsSync(join(root, "package-lock.json")) ? "npm"
+      : existsSync(join(root, "yarn.lock")) ? "yarn" : "npm";
+    let scripts: Record<string, string> = {};
+    try { scripts = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts ?? {}) as Record<string, string>; }
+    catch { return { error: "no readable package.json - inspect the repo README for how to run the app" }; }
+    let script: string | undefined;
+    if (scriptOverride !== undefined) {
+      if (!/^[\w:.-]+$/.test(scriptOverride)) return { error: `invalid script name: ${scriptOverride.slice(0, 40)}` };
+      if (!(scriptOverride in scripts)) return { error: `package.json has no script "${scriptOverride}". Available: ${Object.keys(scripts).join(", ").slice(0, 300)}` };
+      script = scriptOverride;
+    } else {
+      script = ["dev", "start:dev", "start"].find((n) => n in scripts);
+      if (!script) return { error: `no dev/start script in package.json (found: ${Object.keys(scripts).join(", ").slice(0, 300)}) - inspect the README and pass the script name explicitly` };
+    }
+    const cmd = pm === "npm" && script === "start" ? "npm start" : `${pm} run ${script}`;
+    return { pm, script, cmd };
+  }
+
   /** Start the clone's OWN dev server (package.json "dev" script, fixed
    * template: corepack pnpm dev --host 127.0.0.1 --port N) inside the sandbox.
    * Mount/secret isolation identical to run_checks; the server shares the host
    * network so the app's local browser can reach it - the run is labeled
    * NONBLIND for this component. Deps must already be installed offline
    * (factory_run_checks: corepack pnpm install --offline). */
-  async startApp(repo: string, port?: number): Promise<string> {
+  async startApp(repo: string, port?: number, script?: string): Promise<string> {
     const root = this.guardPath(repo, ".");
     const key = `${repo}|app`;
     const have = this.appServers.get(key);
-    if (have && have.child.exitCode === null) return `dev server already running at ${have.url}`;
-    const p = port ?? 5100 + Math.floor(Math.random() * 400);
-    const inv = appServerInvocation(`corepack pnpm dev --host 127.0.0.1 --port ${p}`, root);
+    if (have && have.child.exitCode === null) return `app server already running at ${have.url}`;
+    const launch = this.detectLaunch(root, script);
+    if ("error" in launch) return `CANNOT DETERMINE LAUNCH COMMAND: ${launch.error}`;
+    const inv = appServerInvocation(launch.cmd, root);
     const child = spawn(inv.file, inv.args, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let log = "";
-    child.stdout?.on("data", (d) => (log = (log + d).slice(-4000)));
-    child.stderr?.on("data", (d) => (log = (log + d).slice(-4000)));
+    child.stdout?.on("data", (d) => (log = (log + d).slice(-8000)));
+    child.stderr?.on("data", (d) => (log = (log + d).slice(-8000)));
     const http = await import("node:http");
-    const deadline = Date.now() + 90_000;
-    const ok = await new Promise<boolean>((done) => {
-      const tick = () => {
-        const req = http.get(`http://127.0.0.1:${p}/`, (res) => { res.resume(); done(true); });
-        req.on("error", () => {
-          if (child.exitCode !== null || Date.now() > deadline) return done(false);
-          setTimeout(tick, 1000);
-        });
+    const deadline = Date.now() + 180_000;
+    const urlRe = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d+)\/?/g;
+    const result = await new Promise<{ ok: boolean; url?: string }>((done) => {
+      const probe = (u: string) => new Promise<boolean>((yes) => {
+        const req = http.get(u, (res) => { res.resume(); yes(true); });
+        req.on("error", () => yes(false));
+      });
+      const tick = async () => {
+        const candidates = new Set<string>();
+        if (port) candidates.add(`http://127.0.0.1:${port}/`);
+        for (const m of log.matchAll(urlRe)) candidates.add(`http://127.0.0.1:${m[1]}/`);
+        for (const u of candidates) { if (await probe(u)) return done({ ok: true, url: u }); }
+        if (child.exitCode !== null || Date.now() > deadline) return done({ ok: false });
+        setTimeout(tick, 1000);
       };
       tick();
     });
-    if (!ok) {
+    if (!result.ok || !result.url) {
       try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already dead */ }
-      this.deps.audit.write("tool_call", { tool: "factory_start_app", repo, port: p, ok: false });
-      return `APP FAILED TO START within 90s (exit ${child.exitCode ?? "?"}). Log tail:\n${log.slice(-2000)}`;
+      this.deps.audit.write("tool_call", { tool: "factory_start_app", repo, cmd: launch.cmd, ok: false });
+      return `APP FAILED TO START within 180s (exit ${child.exitCode ?? "?"}) using \`${launch.cmd}\`. Log tail:\n${log.slice(-2000)}`;
     }
-    const url = `http://127.0.0.1:${p}/`;
+    const url = result.url;
     this.appServers.set(key, { url, child });
     const st = this.loadWf(repo);
     if (!st.uiCase) { st.uiCase = true; st.uiOrigin = st.uiOrigin ?? "dev-server"; this.saveWf(repo, st); }
-    this.deps.audit.write("tool_call", { tool: "factory_start_app", repo, port: p, pid: child.pid });
-    return `dev server running at ${url} (pid ${child.pid}) - open it with browse_open and interact with browse_type/browse_click/browse_screenshot. Sandbox note: filesystem/secrets isolated; host network shared, so this run is labeled NONBLIND for the app-server component. Stop with factory_stop_app when done.`;
+    this.deps.audit.write("tool_call", { tool: "factory_start_app", repo, cmd: launch.cmd, url, pid: child.pid });
+    return `app server running at ${url} (pid ${child.pid}, launched via \`${launch.cmd}\` from package.json "${launch.script}" script) - open it with browse_open and interact with browse_type/browse_click/browse_screenshot. Sandbox note: filesystem/secrets isolated; host network shared, so this run is labeled NONBLIND for the app-server component. Stop with factory_stop_app when done.`;
   }
 
   async stopApp(repo: string): Promise<string> {

@@ -27,7 +27,7 @@ export function checkEvalCommand(cmd: string): string | undefined {
     if (base === "python" || base === "python3") {
       if (tokens[i + 1] === "-m" && tokens[i + 2] === "pip") return "eval lockdown: installing packages is not available during evaluation runs";
     }
-    if (base === "npm" && /^(i|install|ci|add)$/.test(tokens[i + 1] ?? "")) return "eval lockdown: installing packages is not available during evaluation runs";
+    if (base === "npm" && /^(i|install|add)$/.test(tokens[i + 1] ?? "")) return "eval lockdown: installing packages is not available during evaluation runs";
     if (/(^|=)(\.\.|~)/.test(t)) return `eval lockdown: paths outside the clone are not available during evaluation runs (${t.slice(0, 40)})`;
   }
   return undefined;
@@ -38,7 +38,8 @@ export function checkEvalCommand(cmd: string): string | undefined {
  * command filter, is the isolation boundary). */
 export const EVAL_SAFE_CMD = new RegExp(
   "^(?!.*(\\$\\(|\\`|>|<))(" +
-    "npm (test|run (test|typecheck|build|report|render))" +
+    "npm (test|run (test[\\w:-]*|typecheck|build|report|render))" +
+    "|npm ci\\b[^\\n;|&]*" +
     "|npx (tsc|tsx --test\\b.*)" +
     "|pytest\\b[^\\n;|&]*" +
     "|python3? -m pytest\\b[^\\n;|&]*" +
@@ -72,6 +73,8 @@ const SANDBOX_EXTRA: { binds: string[]; env: string[] } = (() => {
   if (existsSync(store)) { binds.push("--ro-bind", store, "/opt/pnpm-store"); env.push("npm_config_store_dir=/opt/pnpm-store"); }
   const corepack = `${homedir()}/.cache/node/corepack`;
   if (existsSync(corepack)) { binds.push("--ro-bind", corepack, "/opt/corepack"); env.push("COREPACK_HOME=/opt/corepack"); }
+  const npmCache = process.env.NPM_CACHE_DIR ?? `${homedir()}/.npm`;
+  if (existsSync(npmCache)) { binds.push("--ro-bind", npmCache, "/opt/npm-cache"); env.push("npm_config_cache=/opt/npm-cache"); }
   return { binds, env };
 })();
 
