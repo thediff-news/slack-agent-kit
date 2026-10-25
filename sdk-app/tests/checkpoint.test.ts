@@ -161,3 +161,40 @@ test("debt: settle refuses with a dead remote, clears only on an ACKed sync", as
   const noop = await settleDebt(stateDir, "file:///nonexistent/never.git", "auto-checkpoints", author);
   assert.equal(noop.cleared, true);
 });
+
+// REAL-image restore proof: the actual 93KB agent after-proof screenshot from
+// the private eval case (operator-provided, never committed). Exercises the
+// full real-image pipeline - capture embeds the real bytes, remote sync,
+// delete, clone-back, byte-exact restore. Skips when the file is absent so
+// the suite stays portable; the tiny-image test above always runs.
+const REAL_PNG = "/downloads/shot-1792967048465-0462af89.png";
+test("restore proof (REAL eval PNG, 93KB): capture -> remote -> delete -> clone-back -> byte-exact", { skip: !existsSync(REAL_PNG) }, async () => {
+  const { tmp, dir, stateDir } = fixture();
+  const realBytes = readFileSync(REAL_PNG);
+  assert.equal(realBytes.length, 93607); // the actual artifact, not a substitute
+  const evidencePath = join(tmp, "agent-after-proof.png");
+  writeFileSync(evidencePath, realBytes);
+  const remote = join(tmp, "remote.git");
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  const cap = await captureCheckpoint({ stateDir, repo: "o/n", dir, reason: "pre-approval", evidenceFiles: [evidencePath] });
+  assert.equal(cap.ok, true, JSON.stringify(cap.refused));
+  // the checkpoint JSON must CONTAIN the real image bytes (b64), not a reference
+  const cpRaw = readFileSync(cap.file!, "utf8");
+  assert.ok(cpRaw.length > 93607, `checkpoint ${cpRaw.length}B cannot hold a 93607B image`);
+  const cp = JSON.parse(cpRaw);
+  assert.equal(cp.evidence[0].sha256, sha256(realBytes));
+  const sync = await syncCheckpoints({ stateDir, remote, branch: "cp", author: { name: "t", email: "t@t" } });
+  assert.equal(sync.ok, true, sync.error);
+  // delete the local evidence AND the local checkpoint store: remote is the only copy
+  rmSync(evidencePath);
+  rmSync(stateDir, { recursive: true, force: true });
+  // restore from the remote alone
+  const restore = join(tmp, "restore");
+  execFileSync("git", ["clone", "-q", "-b", "cp", remote, restore]);
+  const cpFile = execFileSync("find", [restore, "-name", "*.json"], { encoding: "utf8" }).trim();
+  const restored = JSON.parse(readFileSync(cpFile, "utf8"));
+  const restoredBytes = Buffer.from(restored.evidence[0].b64, "base64");
+  assert.equal(restoredBytes.length, 93607);
+  assert.equal(sha256(restoredBytes), sha256(realBytes));
+  assert.equal(restoredBytes.compare(realBytes), 0); // byte-exact
+});
