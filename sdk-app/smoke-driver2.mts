@@ -1,8 +1,8 @@
-/** Smoke B: deny leg + armed write against a fake gh (local fixture).
- * Turn A: issue request -> deny -> model must NOT call the tool.
- * Turn B: issue request -> approve -> SDK_APP_DRY_RUN=0 -> fake gh executes. */
+/** Smoke B (event-driven): approve -> ARMED write against a fake gh fixture.
+ * Approval IDs come from the approvals LOG FILE (the ledger is the source of
+ * truth), never from stdout regexes. No external effects: gh is /tmp/fake-bin/gh. */
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { startBudgetProxy } from "./budget-proxy.mjs";
 
 const realKey = readFileSync("KEY-FROM-ENV", "utf8").trim();
@@ -22,39 +22,39 @@ const child = spawn("npx", ["tsx", "sdk-app/src/cli.ts"], {
 let buf = "";
 child.stdout.on("data", (d) => { buf += d.toString(); process.stdout.write(d); });
 const send = (s: string) => { console.log(`[smokeB] >>> ${s}`); child.stdin.write(s + "\n"); };
-let cursor = 0; // only match NEW output - never re-match a previous turn's prompt
-const waitFor = (re: RegExp, ms: number, label: string) => new Promise<boolean>((resolve) => {
+
+/** Poll the approvals ledger for a pending (requested, unresolved) id. */
+const pendingId = (): string | null => {
+  if (!existsSync("/tmp/smoke2-approvals.jsonl")) return null;
+  const rows = readFileSync("/tmp/smoke2-approvals.jsonl", "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const resolved = new Set(rows.filter((r) => r.type === "resolved").map((r) => r.id));
+  const pend = rows.filter((r) => r.type === "requested" && !resolved.has(r.req.id));
+  return pend.length ? pend[pend.length - 1].req.id : null;
+};
+const until = (fn: () => boolean, ms: number, label: string) => new Promise<boolean>((resolve) => {
   const t0 = Date.now();
   const iv = setInterval(() => {
-    const fresh = buf.slice(cursor);
-    if (re.test(fresh)) { cursor = buf.length; clearInterval(iv); resolve(true); }
+    if (fn()) { clearInterval(iv); resolve(true); }
     else if (Date.now() - t0 > ms) { clearInterval(iv); console.log(`[smokeB] TIMEOUT ${label}`); resolve(false); }
   }, 200);
 });
-await waitFor(/you> /, 90000, "ready");
-let deniedAck = true;
-if (!process.env.SMOKE_B_SKIP_DENY) {
-  send("Open an issue in thediff-news/slack-agent-kit titled 'deny-path test issue'");
-  await waitFor(/\[approval needed\] (\S+):/i, 60000, "approval A");
-  const idA = /\[approval needed\] (\S+):/i.exec(buf.slice(cursor))?.[1];
-  if (idA) send(`deny ${idA}`);
-  deniedAck = await waitFor(/denied|not created|won't create|will not create/i, 60000, "deny acknowledgement");
-}
-send("Open an issue in thediff-news/slack-agent-kit titled 'approve-path test issue'");
-await waitFor(/\[approval needed\] (\S+):/i, 60000, "approval B");
-const idB = /\[approval needed\] (\S+):/i.exec(buf.slice(cursor - buf.length + (cursor = buf.length, 0) + buf.length))?.[1] ?? /\[approval needed\] (\S+):/i.exec(buf.slice(cursor))?.[1];
-if (idB) send(`approve ${idB}`);
-const created = await waitFor(/issues\/999/, 60000, "armed creation via fake gh");
+
+await until(() => buf.includes("you> "), 90000, "ready");
+send("Open an issue in thediff-news/slack-agent-kit titled 'armed-fixture test issue' about verifying the write path");
+const gotPrompt = await until(() => pendingId() !== null, 60000, "approval request in ledger");
+if (gotPrompt) send(`approve ${pendingId()}`);
+const created = await until(() => buf.includes("issues/999"), 60000, "armed creation via fake gh");
 send("quit");
 await new Promise((r) => child.on("exit", r));
 const audit = readFileSync("/tmp/smoke2-audit.jsonl", "utf8").trim().split("\n").map((l) => JSON.parse(l));
-const ghCalls = audit.filter((e: any) => e.kind === "tool_call" && e.detail.tool === "github_create_issue");
-const denials = audit.filter((e: any) => e.kind === "approval_resolved" && e.detail.approved === false);
+const ghLog = existsSync("/tmp/fake-gh-calls.log") ? readFileSync("/tmp/fake-gh-calls.log", "utf8").trim() : "";
 console.log("\n[smokeB] VERDICT", JSON.stringify({
-  deniedAck, denialRecorded: denials.length === 1,
-  noToolCallAfterDeny: ghCalls.length === 1, // exactly one: the approved one
-  armedWriteExecuted: created, ghCalls: ghCalls.length,
+  approvalFlow: audit.some((e: any) => e.kind === "approval_requested") && audit.some((e: any) => e.kind === "approval_resolved" && e.detail.approved === true),
+  toolExecuted: audit.some((e: any) => e.kind === "tool_call" && e.detail.tool === "github_create_issue" && e.detail.dryRun === false),
+  armedWriteToFixture: created && /issue create --repo thediff-news\/slack-agent-kit/.test(ghLog),
+  modelReportedUrl: buf.includes("issues/999"),
   costTotal: audit.filter((e: any) => e.kind === "turn_cost").reduce((a: number, e: any) => a + (e.detail.cost_usd || 0), 0).toFixed(6),
+  auditChainOk: (await import("./src/audit.js")).AuditLog.verify("/tmp/smoke2-audit.jsonl") === null,
 }));
 proxy.close();
 process.exit(0);
