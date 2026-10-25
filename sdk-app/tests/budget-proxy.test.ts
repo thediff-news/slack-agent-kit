@@ -74,9 +74,9 @@ const post = (port: number, path: string, body: any) =>
   });
 
 const settle = () => new Promise((r) => setTimeout(r, 50));
-// reservation bound for the shared mock: 1000 counted input *2 (count billed
-// twice) *1.15 padding *2.5/M + 4096 max output *10/M
-const perReq = (2 * 1000 * 1.15 * 2.5 + 4096 * 10) / 1e6; // = 0.04671
+// reservation bound for the shared mock: 1000 counted input (count_tokens is
+// free - verified in the owning docs) *1.15 padding *2.5/M + 4096 max out *10/M
+const perReq = (1000 * 1.15 * 2.5 + 4096 * 10) / 1e6; // = 0.043835
 const msg = { model: "claude-sonnet-5-5", messages: [{ role: "user", content: "hi" }], max_tokens: 4096 };
 
 test("budget proxy: durable ledger survives restart and basis counts against the cap", async () => {
@@ -311,7 +311,7 @@ test("budget proxy: premature upstream close terminates the client instead of ha
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.write("event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 100, output_tokens: 1 } } }) + "\n\n");
-    setTimeout(() => res.socket.destroy(), 50); // tunnel-drop style cut
+    setTimeout(() => res.socket?.destroy(), 50); // tunnel-drop style cut
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -331,4 +331,88 @@ test("budget proxy: premature upstream close terminates the client instead of ha
   assert.notEqual(outcome, "HUNG", "client must be terminated on premature upstream close, not left hanging");
   await settle();
   p.close(); up.close();
+});
+
+test("backpressure: parallel bursts serialize onto in-flight slots instead of 429ing", async () => {
+  // slow upstream: SSE completes after 150ms
+  let concurrent = 0, maxSeen = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url === "/v1/messages/count_tokens") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: 1000 }));
+      return;
+    }
+    concurrent++; maxSeen = Math.max(maxSeen, concurrent);
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    setTimeout(() => {
+      res.end(
+        "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 2000, output_tokens: 1 } } }) + "\n\n" +
+        "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 50 } }) + "\n\n" +
+        "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n"
+      );
+      concurrent--;
+    }, 150);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const p = await startBudgetProxy(cfg((server.address() as any).port, { maxInflight: 2, queueDeadlineMs: 5000 }));
+  const results = await Promise.all([0, 1, 2, 3, 4].map(() => post(p.port, "/v1/messages", msg)));
+  assert.ok(results.every((r) => r.status === 200), "all burst requests admitted via queue, none 429: " + results.map((r) => r.status));
+  assert.ok(maxSeen <= 2, `never more than 2 in-flight upstream (saw ${maxSeen})`);
+  await settle();
+  p.close(); server.close();
+});
+
+test("backpressure: queue deadline 429s a waiter that never gets a slot", async () => {
+  // upstream that never responds to /v1/messages (hangs the slot)
+  const server = http.createServer((req, res) => {
+    if (req.url === "/v1/messages/count_tokens") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: 1000 }));
+      return;
+    }
+    // hang: never end
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const p = await startBudgetProxy(cfg((server.address() as any).port, { maxInflight: 1, queueDeadlineMs: 300 }));
+  const first = post(p.port, "/v1/messages", msg).catch(() => ({ status: 0, body: "" })); // occupies the only slot forever
+  await new Promise((r) => setTimeout(r, 100));
+  const second = await post(p.port, "/v1/messages", msg); // queued, deadline 300ms
+  assert.equal(second.status, 429);
+  assert.ok(second.body.includes("budget_proxy_queue"));
+  (server as any).closeAllConnections?.(); // drop the hung slot so the process can exit
+  p.close(); server.close();
+  await first;
+});
+
+test("backpressure is budget-aware: a queued request waits for a settle to make room instead of eating a cap 429", async () => {
+  // totalUsd 0.06: request A's reservation (0.0438) fits; B does not fit UNTIL
+  // A settles down to its measured cost (~0.005). maxInflight 1 serializes.
+  const server = http.createServer((req, res) => {
+    if (req.url === "/v1/messages/count_tokens") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: 1000 }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    setTimeout(() => {
+      res.end(
+        "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 1000, output_tokens: 1 } } }) + "\n\n" +
+        "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 10 } }) + "\n\n" +
+        "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n"
+      );
+    }, 150);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const p = await startBudgetProxy(cfg((server.address() as any).port, { totalUsd: 0.06, maxInflight: 1, queueDeadlineMs: 5000 }));
+  const aP = post(p.port, "/v1/messages", msg);
+  await new Promise((r) => setTimeout(r, 50));
+  const bP = post(p.port, "/v1/messages", msg); // queued: no slot AND no budget room yet
+  const [a, b] = await Promise.all([aP, bP]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200, "B must be admitted after A's settle made room, not cap-429ed");
+  await settle();
+  p.close(); server.close();
 });

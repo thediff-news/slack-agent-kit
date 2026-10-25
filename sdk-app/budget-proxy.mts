@@ -50,6 +50,13 @@ export interface ProxyConfig {
   /** Conservative spend that happened OUTSIDE this ledger (prior sessions,
    * unsettled reservations): counted against the cap from the first request. */
   basisUsd?: number;
+  /** Max concurrent in-flight reservations (admitted, not yet terminally
+   * settled). Excess requests QUEUE (FIFO) up to queueDeadlineMs instead of
+   * failing: serializing admission stops 429/retry bursts from burning
+   * reservations when per-request bounds are large. Default 2. */
+  maxInflight?: number;
+  /** Ms a queued request waits for an in-flight slot before a 429. Default 60s. */
+  queueDeadlineMs?: number;
   /** Optional append-only per-request journal (JSONL): gate/upstream/settle
    * events with stable request ids, so held reservations can later be
    * classified (settled / unparseable / incomplete / rejected / aborted)
@@ -62,7 +69,7 @@ export type JournalEvent = {
   reqId: string;
   ts: string;
   // gate
-  decision?: "accepted" | "rejected_cap" | "rejected_model" | "rejected_price" | "rejected_tool" | "rejected_count" | "rejected_badjson";
+  decision?: "accepted" | "rejected_cap" | "rejected_model" | "rejected_price" | "rejected_tool" | "rejected_count" | "rejected_badjson" | "rejected_queue_full" | "rejected_queue_timeout";
   model?: string; counted_input?: number; max_tokens?: number; bound?: number; cumulative_after?: number;
   // upstream
   status?: number;
@@ -116,11 +123,11 @@ export function reconcileJournal(events: JournalEvent[]): {
  *  provider-side by the max_tokens rewrite. */
 export const COUNT_TOKENS_MARGIN = 1.15;
 export function requestBoundUsd(inputTokens: number, maxOutputTokens: number, cfg: Pick<ProxyConfig, "inputRatePerMTok" | "outputRatePerMTok">): number {
-  // Input is priced TWICE: once for the messages call and once for the upstream
-  // count_tokens call - the owning docs never state count_tokens is unbilled,
-  // so the bound assumes it bills at the same input rate. (If it is free the
-  // bound is simply more conservative; the ledger stays hard either way.)
-  return (2 * inputTokens * COUNT_TOKENS_MARGIN * cfg.inputRatePerMTok + maxOutputTokens * cfg.outputRatePerMTok) / 1_000_000;
+  // count_tokens is FREE per the owning docs ("Token counting is free to use",
+  // docs.claude.com/en/docs/build-with-claude/token-counting - Pricing and rate
+  // limits), so input is priced ONCE. The 15% padding stays (count is an
+  // estimate); the highest input-side rate stays (cache mix unknown at gate).
+  return (inputTokens * COUNT_TOKENS_MARGIN * cfg.inputRatePerMTok + maxOutputTokens * cfg.outputRatePerMTok) / 1_000_000;
 }
 
 /** Usage parsed from a completed /v1/messages response (SSE stream or plain
@@ -269,6 +276,36 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
     writeFileSync(tmp, JSON.stringify({ cumulative, updated: new Date().toISOString() }));
     renameSync(tmp, cfg.statePath);
   };
+
+  // Backpressure: at most maxInflight reservations occupy upstream slots;
+  // further requests wait in a FIFO queue for a settle to free a slot.
+  const maxInflight = cfg.maxInflight ?? 2;
+  const queueDeadline = cfg.queueDeadlineMs ?? 60_000;
+  const MAX_QUEUE = 16;
+  let inFlight = 0;
+  const waiters: Array<{ admit: () => void; timer: NodeJS.Timeout; bound: number }> = [];
+  const fitsBudgetRef = { fn: (_b: number) => true }; // replaced below (defined after cumulative)
+  const admit = (bound: number): Promise<"ok" | "full" | "timeout"> =>
+    new Promise((resolve) => {
+      if (inFlight < maxInflight && fitsBudgetRef.fn(bound)) { inFlight++; return resolve("ok"); }
+      if (waiters.length >= MAX_QUEUE) return resolve("full");
+      const timer = setTimeout(() => {
+        const i = waiters.findIndex((w) => w.timer === timer);
+        if (i !== -1) waiters.splice(i, 1);
+        resolve("timeout");
+      }, queueDeadline);
+      waiters.push({ admit: () => { clearTimeout(timer); inFlight++; resolve("ok"); }, timer, bound });
+    });
+  const fitsBudget = (bound: number) => basis + cumulative + bound <= cfg.totalUsd;
+  fitsBudgetRef.fn = fitsBudget;
+  const releaseSlot = () => {
+    inFlight = Math.max(0, inFlight - 1);
+    // FIFO, budget-aware: admit the head waiter only if its bound fits the
+    // CURRENT ledger (a settle may have released enough room; if not, it keeps
+    // waiting until its deadline instead of being admitted into a cap 429).
+    const next = waiters[0];
+    if (next && fitsBudget(next.bound)) { waiters.shift(); next.admit(); }
+  };
   const server = http.createServer(async (clientReq, clientRes) => {
     try {
       const chunks: Buffer[] = [];
@@ -348,7 +385,26 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       const boundExact = requestBoundUsd(inputTokens, body.max_tokens, gateCfg);
       console.log(`[budget-proxy] ${new Date().toISOString()} gate req counted_input=${inputTokens} max_tokens=${body.max_tokens} bound_usd=${boundExact.toFixed(6)} cumulative_before_usd=${cumulative.toFixed(6)}`);
       const bound = boundExact;
-      if (basis + cumulative + bound > cfg.totalUsd) {
+      // Bound alone can never fit: reject without queuing.
+      if (basis + bound > cfg.totalUsd) {
+        journal({ ev: "gate", reqId, decision: "rejected_cap", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound });
+        clientRes.writeHead(429, { "content-type": "application/json" });
+        clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_exceeded", message: `budget proxy hard cap: bound $${bound.toFixed(4)} alone exceeds cumulative cap $${cfg.totalUsd}` } }));
+        return;
+      }
+      // Backpressure admission AFTER the bound is known: wait for a slot AND
+      // budget room (a queued request is admitted only when it actually fits,
+      // so a settle can make room instead of the SDK eating a 429-retry burst).
+      const adm = await admit(bound);
+      if (adm !== "ok") {
+        journal({ ev: "gate", reqId, decision: adm === "full" ? "rejected_queue_full" : "rejected_queue_timeout", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound });
+        clientRes.writeHead(429, { "content-type": "application/json" });
+        clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_queue", message: `budget proxy queue ${adm}: no slot/budget within ${queueDeadline}ms` } }));
+        return;
+      }
+      // Hard guard re-checked at admit time (ledger may have moved while queued).
+      if (!fitsBudget(bound)) {
+        releaseSlot();
         journal({ ev: "gate", reqId, decision: "rejected_cap", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound });
         clientRes.writeHead(429, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_exceeded", message: `budget proxy hard cap: bound $${bound.toFixed(4)} would exceed cumulative cap $${cfg.totalUsd} (bound so far $${cumulative.toFixed(4)})` } }));
@@ -361,6 +417,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       try {
         r = await upstreamRaw(cfg, url, JSON.stringify(body));
       } catch (e) {
+        releaseSlot();
         journal({ ev: "upstream_error", reqId, message: (e as Error).message.slice(0, 200) });
         throw e;
       }
@@ -398,6 +455,9 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
           } else {
             journal({ ev: "settle", reqId, via, bytes: raw.length, decompressed, parsed: true, complete: true, measured: settled, released: 0 });
           }
+          // Terminal for this reservation: free the slot AFTER any settle-down,
+          // so a budget-blocked queued request sees the room this settle made.
+          releaseSlot();
         };
         const enc = String(r.headers["content-encoding"] ?? "");
         const done = (e: Error | null, b?: Buffer) => finish(e ? Buffer.alloc(0) : b!, !e);
