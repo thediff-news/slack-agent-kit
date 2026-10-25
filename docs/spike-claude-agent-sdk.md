@@ -103,3 +103,14 @@ Budget-proxy lessons (both fixed):
   count fails CLOSED (request rejected).
 - Node 22 https: request-level createConnection is ignored with agent:false;
   override agent.createConnection for CONNECT-tunneled upstreams inside srt.
+
+## 2026-10-25 evening: rerun - fix produced, independently verified
+
+After the morning's budget-stopped FAIL, config fixes (env output ceiling,
+per-round caps carried, stub-repro socket teardown) let the code stage produce
+the HttpPlanner timeout fix in two edit rounds. Both rounds were again
+terminated by the proxy's reservation 429 (~15-45x actuals), so verification
+was done independently: repro RED on base (5s watchdog) / GREEN on fixed
+(414ms), full suite 77/77 green on the fixed tree. Actuals: round1 $0.100875 +
+round2 $0.169536 = $0.270411 (bench total incl. morning FAIL: $0.3463).
+Detail: bench/results/2026-10-25-claude-sonnet-5-5-rerun.md.
