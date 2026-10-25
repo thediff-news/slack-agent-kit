@@ -1,13 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import zlib from "node:zlib";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { startBudgetProxy, extractUsage, settledCostUsd } from "../budget-proxy.mjs";
 
-type Mode = "json" | "sse" | "nousage" | "huge";
+type Mode = "json" | "sse" | "nousage" | "huge" | "sse-gzip" | "sse-truncated";
 async function mockUpstream(mode: Mode = "json"): Promise<{ port: number; close: () => void }> {
   const server = http.createServer((req, res) => {
     if (req.url === "/v1/messages/count_tokens") {
@@ -19,8 +20,24 @@ async function mockUpstream(mode: Mode = "json"): Promise<{ port: number; close:
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(
         "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 2000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1 } } }) + "\n\n" +
-        "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 500 } }) + "\n\n"
+        "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 500 } }) + "\n\n" +
+        "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n"
       );
+      return;
+    }
+    if (mode === "sse-gzip" || mode === "sse-truncated") {
+      const frames =
+        "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 2000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 } } }) + "\n\n" +
+        "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 500 } }) + "\n\n" +
+        (mode === "sse-gzip" ? "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n" : "");
+      if (mode === "sse-gzip") {
+        res.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" });
+        res.end(zlib.gzipSync(frames));
+      } else {
+        // client disconnect / tunnel teardown: stream ends mid-message
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(frames);
+      }
       return;
     }
     if (mode === "nousage") {
@@ -134,4 +151,36 @@ test("extractUsage: SSE, plain JSON, cache classes, and garbage", () => {
   assert.deepEqual(extractUsage(JSON.stringify({ usage: { input_tokens: 5, output_tokens: 7 } })), { input: 5, output: 7 });
   assert.equal(extractUsage("not json at all"), null);
   assert.equal(extractUsage(JSON.stringify({ id: "x" })), null);
+});
+
+test("budget proxy: gzipped SSE settles to measured usage (compressed tap)", async () => {
+  const up = await mockUpstream("sse-gzip");
+  const p = await startBudgetProxy(cfg(up.port));
+  const r = await post(p.port, "/v1/messages", msg);
+  assert.equal(r.status, 200);
+  await new Promise((r2) => setTimeout(r2, 200));
+  const expected = settledCostUsd({ input: 2000, output: 500 }, cfg(up.port));
+  assert.ok(Math.abs(p.spentBoundUsd() - expected) < 1e-9, `spent ${p.spentBoundUsd()} != ${expected}`);
+  p.close(); up.close();
+});
+
+test("budget proxy: truncated SSE (no message_stop) keeps the full bound", async () => {
+  const up = await mockUpstream("sse-truncated");
+  const p = await startBudgetProxy(cfg(up.port));
+  const r = await post(p.port, "/v1/messages", msg);
+  assert.equal(r.status, 200);
+  await new Promise((r2) => setTimeout(r2, 200));
+  assert.ok(Math.abs(p.spentBoundUsd() - perReq) < 1e-9, `spent ${p.spentBoundUsd()} != full bound ${perReq}`);
+  p.close(); up.close();
+});
+
+test("budget proxy: parallel reservations settle independently (atomic)", async () => {
+  const up = await mockUpstream("sse");
+  const p = await startBudgetProxy(cfg(up.port));
+  const [r1, r2] = await Promise.all([post(p.port, "/v1/messages", msg), post(p.port, "/v1/messages", msg)]);
+  assert.equal(r1.status, 200); assert.equal(r2.status, 200);
+  await new Promise((r3) => setTimeout(r3, 200));
+  const each = settledCostUsd({ input: 2000, output: 500 }, cfg(up.port));
+  assert.ok(Math.abs(p.spentBoundUsd() - 2 * each) < 1e-9, `spent ${p.spentBoundUsd()} != ${2 * each}`);
+  p.close(); up.close();
 });

@@ -24,6 +24,7 @@
  * CONNECT + TLS) when running inside the sandbox.
  */
 import http from "node:http";
+import zlib from "node:zlib";
 import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
@@ -260,17 +261,38 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       const tap: Buffer[] = [];
       let tapBytes = 0;
       r.res.on("data", (c: Buffer) => { if (tapBytes < 8 * 1024 * 1024) { tap.push(c); tapBytes += c.length; } });
-      r.res.on("end", () => {
-        const usage = extractUsage(Buffer.concat(tap).toString("utf8"));
-        if (usage) {
+      // Settle on EITHER terminal event: a proxied stream can end via "close"
+      // without "end" (client disconnect, tunnel teardown). Settlement still
+      // requires COMPLETE-response evidence: a parseable usage record AND, for
+      // SSE, the message_stop frame - a truncated stream keeps the full bound.
+      let settleDone = false;
+      const trySettle = (via: "end" | "close") => {
+        if (settleDone) return;
+        settleDone = true;
+        const raw = Buffer.concat(tap);
+        const finish = (buf: Buffer, decompressed: boolean) => {
+          const text = buf.toString("utf8");
+          const usage = extractUsage(text);
+          const isSse = /^event:/m.test(text);
+          const complete = isSse ? /"type"\s*:\s*"message_stop"/.test(text) : usage !== null;
+          console.log(`[budget-proxy] ${new Date().toISOString()} settle_attempt via=${via} bytes=${raw.length} decompressed=${decompressed} parsed=${usage ? "yes" : "no"} complete=${complete}`);
+          if (!usage || !complete) return; // safe direction: unknown liability keeps the bound
           const settled = settledCostUsd(usage, cfg);
           if (settled < bound) {
             cumulative = cumulative - bound + settled;
             persist();
             console.log(`[budget-proxy] ${new Date().toISOString()} settle req bound_usd=${bound.toFixed(6)} -> measured_bound_usd=${settled.toFixed(6)} (in=${usage.input} out=${usage.output}) cumulative_usd=${cumulative.toFixed(6)}`);
           }
-        }
-      });
+        };
+        const enc = String(r.headers["content-encoding"] ?? "");
+        const done = (e: Error | null, b?: Buffer) => finish(e ? Buffer.alloc(0) : b!, !e);
+        if (/br/i.test(enc)) zlib.brotliDecompress(raw, done);
+        else if (/gzip/i.test(enc)) zlib.gunzip(raw, done);
+        else if (/deflate/i.test(enc)) zlib.inflate(raw, done);
+        else finish(raw, false);
+      };
+      r.res.on("end", () => trySettle("end"));
+      r.res.on("close", () => trySettle("close"));
       r.res.pipe(clientRes); // SSE stream passes through untouched
     } catch (e) {
       console.log(`[budget-proxy] upstream error: ${(e as Error).stack ?? e}`);
