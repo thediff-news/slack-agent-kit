@@ -147,5 +147,7 @@ export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): stri
   if (c.dryRun) problems.push("SDK_APP_DRY_RUN is not 0 (writes would be simulated)");
   if (!process.env.SDK_APP_PROXY_CAP_USD) problems.push("SDK_APP_PROXY_CAP_USD unset (budget cap would silently default)");
   if (!process.env.SDK_APP_PROXY_STATE) problems.push("SDK_APP_PROXY_STATE unset (spend ledger not durable)");
+  const rbacOk = Object.entries(c.rbac.users).some(([u, role]) => (c.rbac.roles[role] ?? []).includes("propose") && (c.userAcls[u] !== undefined || c.approvers.includes(u)));
+  if (!rbacOk) problems.push("no enrolled identity has an RBAC role granting 'propose' (SDK_APP_RBAC_USERS/SDK_APP_RBAC_ROLES) - factory/browser stay locked");
   return problems;
 }

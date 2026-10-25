@@ -8,6 +8,8 @@ const goodEnv = {
   SDK_APP_APPROVERS: "U1",
   SDK_APP_USER_ACLS: '{"U1":["operator"]}',
   SDK_APP_DRY_RUN: "0",
+  SDK_APP_RBAC_USERS: '{"U1":"operator"}',
+  SDK_APP_RBAC_ROLES: '{"operator":["propose","execute","approve"]}',
 } as any;
 
 test("eval preflight: complete config yields no problems", () => {
@@ -26,4 +28,5 @@ test("eval preflight: every missing critical setting is named", () => {
   assert.ok(problems.some((p) => p.includes("DRY_RUN")));
   assert.ok(problems.some((p) => p.includes("PROXY_CAP_USD")));
   assert.ok(problems.some((p) => p.includes("PROXY_STATE")));
+  assert.ok(problems.some((p) => p.includes("RBAC")));
 });
