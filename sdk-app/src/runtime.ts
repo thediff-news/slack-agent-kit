@@ -30,7 +30,7 @@ export async function buildRuntime(env: NodeJS.ProcessEnv = process.env, queryFn
   // Slack user only ever sees docs their identity may read (unknown = public).
   const mcpServerFactory = (ctx: { userId?: string; surface?: "cli" | "slack" }) =>
     buildKitServer({ connectors, config, audit, ragStore, browse, factory, aclTags: ctx.surface === "slack" ? config.aclTagsFor(ctx.userId) : undefined });
-  const agent = new AgentCore({ config, mcpServerFactory, approvals, audit, queryFn, browsePolicy });
+  const agent = new AgentCore({ config, mcpServerFactory, approvals, audit, queryFn, browsePolicy, factory });
   const close = async () => { await browse.close(); ragStore.rag.close(); };
   return { config, audit, approvals, agent, ragStore, browsePolicy, close };
 }

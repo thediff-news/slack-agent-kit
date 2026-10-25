@@ -20,6 +20,12 @@ export function toMrkdwn(text: string): string {
   ).join("");
 }
 
+/** The exact sayThread render pipeline (Markdown -> Slack mrkdwn -> chunks),
+ * exported so tests assert on the payload that actually reaches Slack. */
+export function renderThreadChunks(message: string): string[] {
+  return chunkText(toMrkdwn(message));
+}
+
 export function chunkText(text: string, max = 3500): string[] {
   if (text.length <= max) return [text];
   const chunks: string[] = [];
@@ -54,7 +60,7 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     const threadKey = `${event.channel}:${thread}`;
     const text: string = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
     const sayThread = async (message: string) => {
-      for (const chunk of chunkText(toMrkdwn(message))) await say({ text: chunk, thread_ts: thread });
+      for (const chunk of renderThreadChunks(message)) await say({ text: chunk, thread_ts: thread });
     };
 
     if (/^(stop|cancel)$/i.test(text)) {

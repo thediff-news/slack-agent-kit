@@ -5,6 +5,7 @@
  * a PR is approval-gated + dry-run unless armed. Never merges, never
  * pushes to main. */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -14,8 +15,25 @@ import type { AuditLog } from "./audit.js";
 
 const run = promisify(execFile);
 
-/** Commands the agent may run inside the clone: the repo's own checks only. */
-const SAFE_CMD = /^(npm (test|run (test|typecheck|build))|npx (tsc|tsx --test\b.*)|git (status|diff|log|add|commit|checkout)\b.*)$/;
+/** Commands the agent may run inside the clone: the repo's own checks plus
+ * read-only git and EXACT path-scoped index hygiene. No blanket destructive
+ * git: no bare reset/restore, no `checkout -- <path>`, no `add -A/-u/.`. */
+const SAFE_CMD = new RegExp(
+  "^(" +
+    "npm (test|run (test|typecheck|build))" +
+    "|npx (tsc|tsx --test\\b.*)" +
+    "|git (status|diff|log|show)\\b[^\\n]*" +
+    "|git add(?!.*\\s(-A|--all|-u))(?!.*\\s\\.(\\s|$)) -- [^\\n;|&]+" +
+    "|git commit\\b[^\\n;|&]*" +
+    "|git checkout\\s+(-[bB]\\s+)?[\\w.][\\w./-]*\\s*" +
+    "|git rm --cached( -f)? -- [^\\n;|&]+" +
+    "|git restore --staged -- [^\\n;|&]+" +
+    "|git reset -q -- [^\\n;|&]+" +
+  ")$",
+);
+
+/** App/agent state must never enter a PR automatically (sdk-app/state/*). */
+const NEVER_PR = /(^|\/)sdk-app\/state\//;
 
 const SECRET_PATTERNS = [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, /\bAKIA[0-9A-Z]{16}\b/, /\b(?:sk|xoxb|xoxp|ghp|github_pat)[-_][A-Za-z0-9_-]{20,}\b/, /ANTHROPIC_API_KEY\s*=\s*\S+/];
 
@@ -43,16 +61,56 @@ export class FactoryTools {
     }
     if (ref) {
       // a fix may target a branch under review, not the default branch
-      await run("git", ["-C", dir, "fetch", "--quiet", "origin", ref]);
-      await run("git", ["-C", dir, "checkout", "-q", "FETCH_HEAD"]);
+      const resolved = await this.resolveRef(dir, ref);
+      if (!resolved) return `BLOCKED: ref ${ref} could not be resolved in ${repo}. Supply a branch, tag, or full 40-char SHA; short SHAs resolve when reachable from fetched history.`;
+      await run("git", ["-C", dir, "checkout", "-q", resolved]);
     } else {
       await run("git", ["-C", dir, "fetch", "--quiet", "origin", "HEAD"]).catch(() => {});
     }
+    // the PR diff base: exactly what the factory branch forked from
+    const baseSha = (await run("git", ["-C", dir, "rev-parse", "HEAD"])).stdout.trim();
+    writeFileSync(join(dir, ".git", "factory-base"), baseSha + "\n");
     const branch = `factory/sdk-${Date.now().toString(36)}`;
     await run("git", ["-C", dir, "checkout", "-q", "-B", branch]);
     await this.setupToolchain(dir);
     this.deps.audit.write("tool_call", { tool: "factory_clone", repo, dir, branch, ref });
     return `cloned ${repo}${ref ? ` @ ${ref}` : ""} -> ${dir} on branch ${branch}`;
+  }
+
+  /** Resolve a ref to a full commit SHA. Branches/tags are advertised refs and
+   * fetch by name; a full 40-char SHA fetches by object id (GitHub serves
+   * reachable objects); a short SHA is NOT an advertised ref, so it is
+   * resolved as a real git object against progressively deepened history. */
+  private async resolveRef(dir: string, ref: string): Promise<string | undefined> {
+    const isSha = /^[0-9a-f]{7,40}$/i.test(ref);
+    const local = () => run("git", ["-C", dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((r) => r.stdout.trim()).catch(() => "");
+    if (isSha) {
+      let sha = await local();
+      if (sha) return sha;
+      if (ref.length === 40) {
+        await run("git", ["-C", dir, "fetch", "--quiet", "origin", ref]).catch(() => {});
+        sha = await local();
+        if (sha) return sha;
+      }
+      for (const deepen of ["--deepen=500", "--unshallow"]) {
+        await run("git", ["-C", dir, "fetch", "--quiet", deepen, "origin"]).catch(() => {});
+        sha = await local();
+        if (sha) return sha;
+      }
+      return undefined;
+    }
+    const ok = await run("git", ["-C", dir, "fetch", "--quiet", "origin", ref]).then(() => true).catch(() => false);
+    if (!ok) return undefined;
+    return (await run("git", ["-C", dir, "rev-parse", "FETCH_HEAD"])).stdout.trim();
+  }
+
+  private async baseOf(dir: string): Promise<string> {
+    try {
+      const b = readFileSync(join(dir, ".git", "factory-base"), "utf8").trim();
+      if (/^[0-9a-f]{40}$/.test(b)) return b;
+    } catch { /* no recorded base */ }
+    const mb = await run("git", ["-C", dir, "merge-base", "origin/HEAD", "HEAD"]).then((r) => r.stdout.trim()).catch(() => "");
+    return /^[0-9a-f]{40}$/.test(mb) ? mb : "HEAD";
   }
 
   /** The clone must run the repo's own checks (`npx tsx --test ...`) without
@@ -139,26 +197,71 @@ export class FactoryTools {
     return { clean: findings.length === 0, findings };
   }
 
+  private prStash?: { fingerprint: string };
+
+  /** The exact review set for a PR: branch-vs-base (COMMITTED and working and
+   * untracked), minus app/agent state paths. Fingerprint binds an approval to
+   * precisely this diff + payload; a changed branch invalidates it. */
+  private async prReviewSet(repo: string, title: string, body: string) {
+    const dir = this.cloneDir(repo);
+    const branch = (await run("git", ["-C", dir, "branch", "--show-current"])).stdout.trim();
+    const base = await this.baseOf(dir);
+    await run("git", ["-C", dir, "add", "-N", "-A"]); // intent-to-add: untracked join the diff
+    const EXC = [":(exclude)sdk-app/state/*", ":(exclude)sdk-app/state"];
+    const { stdout: fullDiff } = await run("git", ["-C", dir, "diff", base, "--", ".", ...EXC]);
+    const { stdout: stat } = await run("git", ["-C", dir, "diff", "--stat", base, "--", ".", ...EXC]);
+    const { stdout: committedStat } = await run("git", ["-C", dir, "diff", "--stat", base, "HEAD", "--", ".", ...EXC]);
+    const { stdout: stateFiles } = await run("git", ["-C", dir, "diff", "--name-only", base, "--", "sdk-app/state"]);
+    const fingerprint = createHash("sha256").update(`${branch}\n${base}\n${title}\n${body}\n${fullDiff}`).digest("hex");
+    return { dir, branch, base, fullDiff, stat, committedStat, stateFiles: stateFiles.trim(), fingerprint };
+  }
+
+  /** Called by the approval gate BEFORE the human decides: records the exact
+   * diff fingerprint the approval covers, for createPr to verify at execution. */
+  async prFingerprint(repo: string, title: string, body: string): Promise<string> {
+    const rs = await this.prReviewSet(repo, title, body);
+    this.prStash = { fingerprint: rs.fingerprint };
+    return rs.fingerprint;
+  }
+
   /** GATED + armed-only. dry-run returns the exact plan without executing. */
   async createPr(repo: string, title: string, body: string): Promise<string> {
     if (repo.startsWith("/")) return "BLOCKED: PRs only for GitHub repos, not local fixtures.";
     const dir = this.cloneDir(repo);
     const scan = await this.scanDiff(repo);
     if (!scan.clean) return `BLOCKED: secrets in the diff: ${scan.findings.join("; ")}`;
-    const { stdout: stat } = await run("git", ["-C", dir, "diff", "--stat", "HEAD"]);
-    const branch = (await run("git", ["-C", dir, "branch", "--show-current"])).stdout.trim();
-    const { stdout: dirty } = await run("git", ["-C", dir, "status", "--porcelain"]);
+    const rs = await this.prReviewSet(repo, title, body);
+    const { branch, base, stat, committedStat, fingerprint } = rs;
+    // Approval binding: when the gate stashed a fingerprint, this execution
+    // must match it exactly - any branch/diff change after approval invalidates.
+    if (this.prStash) {
+      const stashed = this.prStash.fingerprint;
+      this.prStash = undefined;
+      if (stashed !== fingerprint) {
+        this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, refused: "diff-changed-after-approval" });
+        return `REFUSED: the branch changed after approval (diff-hash was ${stashed.slice(0, 12)}, now ${fingerprint.slice(0, 12)}). Request approval again for the new diff.`;
+      }
+    }
     // Idempotency: an open PR for this exact branch already exists -> return
     // it instead of double-pushing/double-opening on a retried turn.
     const existing = await run("gh", ["pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"]).then((r) => r.stdout.trim()).catch(() => "");
-    if (!dirty.trim() && !existing) return `No changes on ${branch} and no open PR - nothing to do.`;
+    const hasCommitted = Boolean(committedStat.trim());
+    const hasWorking = Boolean(stat.trim()) && stat.trim() !== committedStat.trim();
+    if (!stat.trim() && !existing) return `No changes on ${branch} vs base ${base.slice(0, 7)} and no open PR - nothing to do.`;
+    const excludedNote = rs.stateFiles ? `\nEXCLUDED (never auto-PR'd state): ${rs.stateFiles}` : "";
     if (this.deps.config.dryRun) {
-      return `[dry-run] would ${dirty.trim() ? `commit on ${branch}, push, and ` : ""}${existing ? "re-use the existing open PR" : "open a PR"} in ${repo}:\nTITLE: ${title}\nDIFF STAT:\n${stat || "(no diff)"}${existing ? `\nEXISTING PR: ${existing}` : ""}\nArm with SDK_APP_DRY_RUN=0 to execute.`;
+      return `[dry-run] would ${hasWorking ? "commit the working-tree files on the branch, then " : ""}${hasCommitted || hasWorking ? `push ${branch} and ` : ""}${existing ? "re-use the existing open PR" : "open a PR"} in ${repo}:\nTITLE: ${title}\nDIFF STAT (vs base ${base.slice(0, 7)}, committed + working):\n${stat || "(no diff)"}${excludedNote}\nDIFF HASH: ${fingerprint.slice(0, 12)}${existing ? `\nEXISTING PR: ${existing}` : ""}\nArm with SDK_APP_DRY_RUN=0 to execute.`;
     }
-    if (dirty.trim()) {
-      await run("git", ["-C", dir, "add", "-A"]);
-      await run("git", ["-C", dir, "commit", "-q", "-m", title]);
-      await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+    if (stat.trim()) {
+      // commit only the reviewed set - never app/agent state paths
+      await run("git", ["-C", dir, "add", "-A", "--", ".", ":(exclude)sdk-app/state/*", ":(exclude)sdk-app/state"]);
+      const { stdout: staged } = await run("git", ["-C", dir, "diff", "--cached", "--name-only"]);
+      if (staged.trim()) {
+        await run("git", ["-C", dir, "commit", "-q", "-m", title]);
+        await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+      } else if (hasCommitted) {
+        await run("git", ["-C", dir, "push", "-q", "-u", "origin", branch]);
+      }
     }
     if (existing) {
       this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: existing, idempotent: true });

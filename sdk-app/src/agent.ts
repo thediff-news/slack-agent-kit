@@ -65,6 +65,7 @@ export class AgentCore {
       audit: AuditLog;
       queryFn?: QueryFn;
       browsePolicy?: BrowsePolicy;
+      factory?: import("./factory-tools.js").FactoryTools;
     },
   ) {
     this.sessionsFile = deps.config.auditLog.replace(/[^/]+$/, "sessions.json");
@@ -148,7 +149,13 @@ export class AgentCore {
         return { behavior: "allow", updatedInput: input };
       }
       if ((MUTATING_TOOLS as readonly string[]).some((m) => toolName === qualified(m))) {
-        const summary = `${toolName}(${Object.entries(input).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(", ")})`;
+        let summary = `${toolName}(${Object.entries(input).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(", ")})`;
+        // Approval binds the EXACT branch diff: record the diff fingerprint the
+        // human approves; factory_create_pr verifies it unchanged at execution.
+        if (shortName === "factory_create_pr" && this.deps.factory) {
+          const fp = await this.deps.factory.prFingerprint(String(input.repo), String(input.title), String(input.body)).catch(() => "");
+          if (fp) summary += ` | diff-hash ${fp.slice(0, 12)}`;
+        }
         const { req, decision } = approvals.request(toolName, input, summary, threadKey);
         audit.write("approval_requested", { id: req.id, tool: toolName, summary }, threadKey);
         handlers.onApprovalNeeded?.(req.id, summary);
