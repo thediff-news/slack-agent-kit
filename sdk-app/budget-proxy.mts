@@ -445,7 +445,12 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
           const isSse = /^event:/m.test(text);
           const complete = isSse ? /"type"\s*:\s*"message_stop"/.test(text) : usage !== null;
           console.log(`[budget-proxy] ${new Date().toISOString()} settle_attempt via=${via} bytes=${raw.length} decompressed=${decompressed} parsed=${usage ? "yes" : "no"} complete=${complete}`);
-          if (!usage || !complete) { journal({ ev: "settle", reqId, via, bytes: raw.length, decompressed, parsed: !!usage, complete }); return; } // safe direction: unknown liability keeps the bound
+          if (!usage || !complete) {
+            if (r.status >= 400) console.log(`[budget-proxy] ${new Date().toISOString()} upstream_error_body status=${r.status} ${text.slice(0, 300).replace(/\n/g, " ")}`);
+            journal({ ev: "settle", reqId, via, bytes: raw.length, decompressed, parsed: !!usage, complete });
+            releaseSlot(); // settle is TERMINAL for the reservation even when unparseable: the bound stays held (safe direction) but the in-flight slot must free, or 400/truncated responses wedge the queue
+            return;
+          }
           const settled = settledCostUsd(usage, settleCfgFor(usage));
           if (settled < bound) {
             cumulative = cumulative - bound + settled;

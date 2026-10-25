@@ -416,3 +416,38 @@ test("backpressure is budget-aware: a queued request waits for a settle to make 
   await settle();
   p.close(); server.close();
 });
+
+test("backpressure: an unparseable upstream response (400 error body) frees its in-flight slot", async () => {
+  // Regression: a 400's error body has no usage, so its bound stays held
+  // (safe direction) - but the SLOT must still release, or two 400s wedge the
+  // queue permanently (observed live: every retry then ate a queue timeout).
+  let calls = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url === "/v1/messages/count_tokens") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: 1000 }));
+      return;
+    }
+    calls++;
+    if (calls <= 2) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "synthetic" } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      "event: message_start\ndata: " + JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 2000, output_tokens: 1 } } }) + "\n\n" +
+      "event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", usage: { output_tokens: 50 } }) + "\n\n" +
+      "event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n"
+    );
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const p = await startBudgetProxy(cfg((server.address() as any).port, { maxInflight: 1, queueDeadlineMs: 3000 }));
+  const r1 = await post(p.port, "/v1/messages", msg);
+  const r2 = await post(p.port, "/v1/messages", msg);
+  assert.equal(r1.status, 400); assert.equal(r2.status, 400);
+  const r3 = await post(p.port, "/v1/messages", msg); // would queue-timeout at 3s if the slots leaked
+  assert.equal(r3.status, 200, "third request admitted: 400s released their slots");
+  p.close(); server.close();
+});
