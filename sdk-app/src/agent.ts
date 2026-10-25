@@ -82,7 +82,7 @@ export class AgentCore {
     const canUseTool = async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
       if (!known) {
         const short = toolName.startsWith(`mcp__${SERVER_NAME}__`) ? toolName.slice(`mcp__${SERVER_NAME}__`.length) : toolName;
-        if (short.startsWith("factory_") || short.startsWith("browse_") || (MUTATING_TOOLS as readonly string[]).includes(short)) {
+        if (short.startsWith("factory_") || short.startsWith("browse_") || (MUTATING_TOOLS as readonly string[]).includes(short) || (short === "sync_docs" && !config.publicSync)) {
           audit.write("identity_denied", { tool: short, user: ctx.userId ?? "unknown" }, threadKey);
           return { behavior: "deny", message: "Your identity is not enrolled in this app; factory, browser and write capabilities stay locked until an admin enrolls you. You can search public docs." };
         }
@@ -138,7 +138,7 @@ export class AgentCore {
       mcpServers: { [SERVER_NAME]: mcpServer },
       // Unknown identities: only the public-doc read tools are pre-allowed;
       // everything else routes through canUseTool, which denies it above.
-      allowedTools: (known ? [...READ_TOOLS] : ["search_docs", "get_doc", "sync_docs"]).map(qualified),
+      allowedTools: (known ? [...READ_TOOLS] : config.publicSync ? ["search_docs", "get_doc", "sync_docs"] : ["search_docs", "get_doc"]).map(qualified),
       tools: [], // no built-in CLI tools; the agent only gets the kit MCP server
       canUseTool,
       permissionMode: "default",

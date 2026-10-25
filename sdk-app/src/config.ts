@@ -29,6 +29,12 @@ export type AppConfig = {
   aclTagsFor(userId?: string): string[] | undefined;
   /** A requester we can bind to a configured identity (ACL entry or named approver). */
   isKnownIdentity(userId?: string): boolean;
+  /** Approval authority comes ONLY from the approvers list - ACL enrollment
+   * must never grant it (no role collapse). */
+  isApprover(userId?: string): boolean;
+  /** Explicit opt-in: let UNENROLLED users run sync_docs (index rebuild).
+   * Default false: sync mutates the index and discloses existence counts. */
+  publicSync: boolean;
 };
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -62,6 +68,10 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     isKnownIdentity(userId?: string) {
       return Boolean(userId && (userAcls[userId] !== undefined || cfg.approvers.includes(userId)));
     },
+    isApprover(userId?: string) {
+      return Boolean(userId) && cfg.approvers.includes(userId!);
+    },
+    publicSync: env.SDK_APP_PUBLIC_SYNC === "1",
   };
   return cfg;
 }

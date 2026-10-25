@@ -93,13 +93,41 @@ test("agent gate: unknown slack identity denied factory/browse/write, allowed pu
     assert.equal(d.behavior, "deny", `${t} denied for unknown identity`);
     assert.match(d.message, /not enrolled/);
   }
-  for (const t of ["search_docs", "get_doc", "sync_docs"]) {
+  for (const t of ["search_docs", "get_doc"]) {
     assert.equal((await gate(`mcp__kit__${t}`, {})).behavior, "allow", `${t} stays open`);
   }
-  assert.deepEqual(captured.allowedTools, ["mcp__kit__search_docs", "mcp__kit__get_doc", "mcp__kit__sync_docs"]);
+  assert.equal((await gate("mcp__kit__sync_docs", {})).behavior, "deny", "sync denied for unknown identity (index mutation + existence counts)");
+  assert.deepEqual(captured.allowedTools, ["mcp__kit__search_docs", "mcp__kit__get_doc"]);
   // enrolled identity: factory read passes the identity tier (no identity_denied)
   await agent.chat("t2", "hi", {}, { userId: "U_ENG", surface: "slack" });
   const d2 = await captured.canUseTool("mcp__kit__factory_clone", { repo: "x" });
   assert.equal(/not enrolled/.test(d2.message ?? ""), false, "enrolled not identity-denied");
   assert.ok(captured.allowedTools.includes("mcp__kit__factory_clone"), "enrolled keeps full read tool set");
+});
+
+test("sync_docs: unknown identity denied by default; publicSync=1 opens it; enrolled always allowed", async () => {
+  const { config, audit, approvals } = mk();
+  let captured: any;
+  const fakeQuery = (({ options }: any) => { captured = options; return (async function* () { yield { type: "result", subtype: "success", session_id: "s" }; })(); }) as any;
+  const agent = new AgentCore({ config, approvals, audit, queryFn: fakeQuery, mcpServerFactory: () => ({}) as any });
+  await agent.chat("t1", "hi", {}, { userId: "U_RANDOM", surface: "slack" });
+  const d = await captured.canUseTool("mcp__kit__sync_docs", {});
+  assert.equal(d.behavior, "deny");
+  assert.deepEqual(captured.allowedTools, ["mcp__kit__search_docs", "mcp__kit__get_doc"]);
+  // enrolled identity keeps sync
+  const mk2 = mk({ SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}' });
+  let cap2: any;
+  const fq2 = (({ options }: any) => { cap2 = options; return (async function* () { yield { type: "result", subtype: "success", session_id: "s" }; })(); }) as any;
+  const agent2 = new AgentCore({ config: mk2.config, approvals: mk2.approvals, audit: mk2.audit, queryFn: fq2, mcpServerFactory: () => ({}) as any });
+  await agent2.chat("t1", "hi", {}, { userId: "U_ENG", surface: "slack" });
+  assert.ok(cap2.allowedTools.includes("mcp__kit__sync_docs"));
+});
+
+test("no role collapse: ACL enrollment grants identity but never approver authority", () => {
+  const { config } = mk({ SDK_APP_USER_ACLS: '{"U_ENG":["engineering"]}', SDK_APP_APPROVERS: "U_ADMIN" });
+  assert.equal(config.isKnownIdentity("U_ENG"), true, "enrolled via ACL map");
+  assert.equal(config.isApprover("U_ENG"), false, "ACL enrollment is NOT approver authority");
+  assert.equal(config.isApprover("U_ADMIN"), true);
+  assert.equal(config.isApprover("U_RANDOM"), false);
+  assert.equal(config.isApprover(undefined), false);
 });

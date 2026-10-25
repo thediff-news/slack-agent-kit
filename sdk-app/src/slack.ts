@@ -26,8 +26,7 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
     if (m) {
       // Named approvers only (kit RBAC carried over): SDK_APP_APPROVERS is a
       // comma-separated list of Slack user IDs. Anyone else is ignored.
-      const approvers = config.approvers;
-      if (!approvers.length || !approvers.includes(event.user ?? "")) {
+      if (!config.isApprover(event.user)) {
         await sayThread("You are not a named approver for this app.");
         return;
       }
