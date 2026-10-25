@@ -80,3 +80,26 @@ task (HttpPlanner missing-timeout bug) with the same PASS standard as the
 Oct 20 baseline and the opencode spike: harness suite green after edit rounds,
 correctness of the fix checked independently. Env: `OPENAI_API_KEY`
 (triage/plan/repro stages stay on the kit's OpenAI llm) and `ANTHROPIC_API_KEY`.
+
+## 2026-10-25 PM: smoke PASS, factory bench BUDGET-STOPPED (FAIL)
+
+Smoke: full stack (srt + budget proxy + SDK, Sonnet 5.5) answered
+SANDBOX_SMOKE_OK in 1 turn, 2.7s SDK duration, $0.030209 actual.
+Bench (HttpPlanner timeout task, stubbed non-code stages, changed conditions):
+3 rounds, all budget-stopped in exploration, no diff, FAIL. Exact costs and the
+reservation analysis: bench/results/2026-10-25-claude-sonnet-5-5-budget-stopped.md.
+
+Budget-proxy lessons (both fixed):
+- Per-request bound reserves worst case (provider-enforced max_tokens output
+  ceiling + count_tokens input priced twice - billing undocumented - at
+  cache-write rate + 15% padding). Reservation/actual ratio measured 15-45x.
+  Size round caps against the bound structure, not expected actuals.
+- The per-round proxy reset cumulative reservation; cross-round guarantee came
+  only from the pipeline's actuals gate. Fixed: each round's proxy cap now
+  carries prior reservation (min(round budget, total cap - bound so far)), so
+  total reserved <= total cap as well as total actual <= total cap.
+- count_tokens rejects request bodies containing newer fields (per-message
+  output_config on Sonnet 5.5): strip them for the count call only; a failed
+  count fails CLOSED (request rejected).
+- Node 22 https: request-level createConnection is ignored with agent:false;
+  override agent.createConnection for CONNECT-tunneled upstreams inside srt.
