@@ -61,7 +61,7 @@ export class FactoryTools {
     }
     if (ref) {
       // a fix may target a branch under review, not the default branch
-      const resolved = await this.resolveRef(dir, ref);
+      const resolved = await this.resolveRef(dir, ref, repo);
       if (!resolved) return `BLOCKED: ref ${ref} could not be resolved in ${repo}. Supply a branch, tag, or full 40-char SHA; short SHAs resolve when reachable from fetched history.`;
       await run("git", ["-C", dir, "checkout", "-q", resolved]);
     } else {
@@ -81,7 +81,7 @@ export class FactoryTools {
    * fetch by name; a full 40-char SHA fetches by object id (GitHub serves
    * reachable objects); a short SHA is NOT an advertised ref, so it is
    * resolved as a real git object against progressively deepened history. */
-  private async resolveRef(dir: string, ref: string): Promise<string | undefined> {
+  private async resolveRef(dir: string, ref: string, repo?: string): Promise<string | undefined> {
     const isSha = /^[0-9a-f]{7,40}$/i.test(ref);
     const local = () => run("git", ["-C", dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((r) => r.stdout.trim()).catch(() => "");
     if (isSha) {
@@ -91,6 +91,17 @@ export class FactoryTools {
         await run("git", ["-C", dir, "fetch", "--quiet", "origin", ref]).catch(() => {});
         sha = await local();
         if (sha) return sha;
+      } else if (repo && !repo.startsWith("/")) {
+        // A short SHA is not an advertised ref and can sit outside the shallow
+        // window. Resolve it through the GitHub API to its full SHA, then
+        // fetch that object directly (GitHub serves reachable objects by full
+        // SHA - the same path the 40-char branch above uses).
+        const full = await run("gh", ["api", `repos/${repo}/commits/${ref}`, "--jq", ".sha"]).then((r) => r.stdout.trim()).catch(() => "");
+        if (/^[0-9a-f]{40}$/i.test(full)) {
+          await run("git", ["-C", dir, "fetch", "--quiet", "origin", full]).catch(() => {});
+          sha = await local();
+          if (sha) return sha;
+        }
       }
       for (const deepen of ["--deepen=500", "--unshallow"]) {
         await run("git", ["-C", dir, "fetch", "--quiet", deepen, "origin"]).catch(() => {});

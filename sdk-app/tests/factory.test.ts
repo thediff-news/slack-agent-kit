@@ -81,3 +81,39 @@ test("clone gets a working toolchain: repo-local npx resolution inside the clone
   const st = await f.runChecks(src, "git status");
   assert.ok(!/^.. node_modules$/m.test(st), `symlinked toolchain must not enter the git diff: ${st.slice(0, 200)}`);
 });
+
+test("resolveRef: short SHA outside the shallow window resolves via gh api + direct object fetch", async () => {
+  const origin = mkdtempSync(join(tmpdir(), "fxorigin-"));
+  execFileSync("git", ["init", "-q", origin]);
+  execFileSync("git", ["-C", origin, "config", "user.email", "t@t"]);
+  execFileSync("git", ["-C", origin, "config", "user.name", "t"]);
+  execFileSync("git", ["-C", origin, "config", "uploadpack.allowAnySHA1InWant", "true"]);
+  let target = "";
+  for (let i = 0; i < 30; i++) {
+    writeFileSync(join(origin, "f.txt"), `v${i}\n`);
+    execFileSync("git", ["-C", origin, "add", "-A"]);
+    execFileSync("git", ["-C", origin, "commit", "-qm", `c${i}`]);
+    if (i === 2) target = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  }
+  const dir = mkdtempSync(join(tmpdir(), "fxshallow-"));
+  execFileSync("git", ["clone", "-q", "--depth", "3", `file://${origin}`, dir]);
+  const short = target.slice(0, 7);
+  // not resolvable from the shallow window alone
+  let threw = false;
+  try { execFileSync("git", ["-C", dir, "rev-parse", "--verify", "--quiet", `${short}^{commit}`], { stdio: "pipe" }); } catch { threw = true; }
+  assert.ok(threw, "precondition: short SHA absent from the shallow clone");
+
+  // stub gh: answer the commits API for the short SHA with its full SHA
+  const bin = mkdtempSync(join(tmpdir(), "fxbin-"));
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\nif [ "$1" = "api" ]; then echo "${target}"; exit 0; fi\nexit 1\n`, { mode: 0o755 });
+
+  const { f } = fixture();
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const resolved = await (f as any).resolveRef(dir, short, "owner/repo");
+    assert.equal(resolved, target, "short SHA resolved to the full commit via gh api + object fetch");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
