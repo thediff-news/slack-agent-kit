@@ -62,6 +62,9 @@ export type UiEvidence = { kind: "browse" | "screenshot"; at: string; tree: stri
 export type WorkflowState = {
   caseId: string;
   baseSha: string;
+  /** The ref the clone started from (branch/tag the case targets), if any:
+   * the PR opens against it instead of the repo default branch. */
+  baseRef?: string;
   /** Tree hash at clone time: the untouched base the case forked from. */
   baseTree: string;
   /** UI case: a screenshot rode in with the report, or the clone was served/
@@ -131,7 +134,7 @@ export class FactoryTools {
     await run("git", ["-C", dir, "checkout", "-q", "-B", branch]);
     // fresh case: reset the workflow evidence ledger. A report that carried a
     // screenshot starts as a UI case; serving/rendering the clone flips it too.
-    this.saveWf(repo, { caseId: branch, baseSha, baseTree: await this.treeHash(dir), uiCase: Boolean(turnCtx?.hasImages), uiOrigin: turnCtx?.hasImages ? "image" : undefined, writes: 0, sourceWrites: 0 });
+    this.saveWf(repo, { caseId: branch, baseSha, baseRef: ref, baseTree: await this.treeHash(dir), uiCase: Boolean(turnCtx?.hasImages), uiOrigin: turnCtx?.hasImages ? "image" : undefined, writes: 0, sourceWrites: 0 });
     await this.setupToolchain(dir);
     this.deps.audit.write("tool_call", { tool: "factory_clone", repo, dir, branch, ref });
     return `cloned ${repo}${ref ? ` @ ${ref}` : ""} -> ${dir} on branch ${branch}`;
@@ -625,7 +628,10 @@ export class FactoryTools {
       this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: existing, idempotent: true });
       return `PR already open for ${branch}: ${existing} (no duplicate created).`;
     }
-    const { stdout } = await run("gh", ["pr", "create", "--repo", repo, "--head", branch, "--title", title, "--body", body, "--draft"]);
+    const wfBase = this.loadWf(repo).baseRef;
+    // --base needs a branch name; a SHA ref keeps the repo default base
+    const baseArgs = wfBase && !/^[0-9a-f]{40}$/i.test(wfBase) ? ["--base", wfBase] : [];
+    const { stdout } = await run("gh", ["pr", "create", "--repo", repo, "--head", branch, ...baseArgs, "--title", title, "--body", body, "--draft"]);
     this.deps.audit.write("tool_call", { tool: "factory_create_pr", repo, title, url: stdout.trim() });
     return `PR created: ${stdout.trim()}`;
   }
