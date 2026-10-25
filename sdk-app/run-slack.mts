@@ -1,10 +1,11 @@
 /** Production launcher: budget proxy (hard cap) + Slack surface in one process.
- * Tokens come from vault-copied files, never from the command line or logs. */
+ * Tokens come from the environment (launcher injects them), never from the command line or logs. */
 import { readFileSync } from "node:fs";
 import { startBudgetProxy } from "./budget-proxy.mjs";
 import { startSlackApp } from "./src/slack.js";
 
-const realKey = readFileSync("KEY-FROM-ENV", "utf8").trim();
+const realKey = process.env.ANTHROPIC_API_KEY ?? (process.env.SDK_APP_KEY_FILE ? readFileSync(process.env.SDK_APP_KEY_FILE, "utf8").trim() : "");
+if (!realKey) throw new Error("ANTHROPIC_API_KEY (or SDK_APP_KEY_FILE) is required");
 const proxy = await startBudgetProxy({
   totalUsd: Number(process.env.SDK_APP_PROXY_CAP_USD || "2.00"),
   model: "claude-sonnet-5-5", maxOutputTokens: 4096,

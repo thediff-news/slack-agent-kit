@@ -5,7 +5,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { startBudgetProxy } from "./budget-proxy.mjs";
 
-const realKey = readFileSync("KEY-FROM-ENV", "utf8").trim();
+const realKey = process.env.ANTHROPIC_API_KEY ?? (process.env.SDK_APP_KEY_FILE ? readFileSync(process.env.SDK_APP_KEY_FILE, "utf8").trim() : "");
+if (!realKey) throw new Error("ANTHROPIC_API_KEY (or SDK_APP_KEY_FILE) is required");
 const proxy = await startBudgetProxy({
   totalUsd: 0.50, model: "claude-sonnet-5-5", maxOutputTokens: 2048,
   inputRatePerMTok: 2.50, outputRatePerMTok: 10,
