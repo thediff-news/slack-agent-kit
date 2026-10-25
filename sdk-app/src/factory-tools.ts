@@ -302,6 +302,14 @@ export class FactoryTools {
     const stateDir = dirname(this.deps.config.auditLog);
     const pending = readDebt(stateDir);
     if (pending.length === 0) return undefined;
+    // Heal before gating: re-capture the affected worktree if it survives on
+    // disk (captures are whole-worktree, so this covers the lost bytes), then
+    // let one ACKed sync settle every pending entry.
+    try {
+      const repo = pending[pending.length - 1].repo;
+      const dir = this.cloneDir(repo);
+      if (existsSync(dir)) await captureCheckpoint({ stateDir, repo, dir, reason: "manual", requestId: "debt-heal" });
+    } catch { /* capture failed - the gate below stays closed */ }
     if (this.deps.config.checkpointRemote) {
       const settled = await settleDebt(stateDir, this.deps.config.checkpointRemote, "auto-checkpoints", { name: "sdk-app-checkpoint", email: "checkpoint@localhost" });
       if (settled.cleared) return undefined;

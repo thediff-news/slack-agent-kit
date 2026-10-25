@@ -170,6 +170,12 @@ export function clearDebt(stateDir: string): void {
 export async function settleDebt(stateDir: string, remote: string, branch: string, author: { name: string; email: string }): Promise<{ cleared: boolean; pending: number; error?: string }> {
   const pending = readDebt(stateDir);
   if (pending.length === 0) return { cleared: true, pending: 0 };
+  // A no-op sync must NOT clear debt: an empty store means the captured bytes
+  // are missing, not saved. The caller must re-capture the worktree first.
+  const store = join(stateDir, "checkpoints");
+  if (!existsSync(store) || !readdirSync(store).some((f) => f.endsWith(".json"))) {
+    return { cleared: false, pending: pending.length, error: "checkpoint store empty - the captured bytes are missing; re-capture the worktree before settling" };
+  }
   const sync = await syncCheckpoints({ stateDir, remote, branch, author });
   if (sync.ok) { clearDebt(stateDir); return { cleared: true, pending: 0 }; }
   return { cleared: false, pending: pending.length, error: sync.error };

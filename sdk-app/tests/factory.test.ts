@@ -190,3 +190,39 @@ test("cloneOwnsProcess: cmdline OR cwd inside the clone, nothing else", async ()
   assert.ok(!cloneOwnsProcess(root, "tsx\0--test\0tests/factory.test.ts\0", "/tmp/sak/sdk-app"), "test runner self");
   assert.ok(!cloneOwnsProcess(root, "", ""), "empty signals");
 });
+
+test("boot-recovery debt gates mutations + approvals until an ACKed sync, then restores operation", async () => {
+  const src = mkdtempSync(join(tmpdir(), "fxrepo-"));
+  execFileSync("git", ["init", "-q", src]);
+  execFileSync("git", ["-C", src, "config", "user.email", "t@t"]);
+  execFileSync("git", ["-C", src, "config", "user.name", "t"]);
+  writeFileSync(join(src, "app.sh"), "echo v1\n");
+  execFileSync("git", ["-C", src, "add", "-A"]);
+  execFileSync("git", ["-C", src, "commit", "-qm", "init"]);
+  const dir = mkdtempSync(join(tmpdir(), "fxstate-"));
+  const remote = join(dir, "ckpt-remote.git");
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  const config = configFromEnv({ SDK_APP_AUDIT_LOG: join(dir, "audit.jsonl"), SDK_APP_GITHUB_REPOS: "thediff-news/slack-agent-kit", SDK_APP_CHECKPOINT_REMOTE: "file:///nonexistent/never.git" } as any);
+  const f = new FactoryTools({ config, audit: new AuditLog(config.auditLog) });
+  const { recordDebt, readDebt } = await import("../src/checkpoint.js");
+  const { dirname } = await import("node:path");
+  await f.clone(src);
+  // simulate: boot-recovery capture or sync FAILED at startup -> debt marker
+  recordDebt(dirname(config.auditLog), { repo: src, reason: "manual", at: new Date().toISOString(), error: "boot-recovery capture refused: simulated" });
+  // remote still dead: every relevant path is BLOCKED, debt stays
+  assert.match(await f.writeFile(src, "app.sh", "echo v2\n"), /BLOCKED: 1 mutation checkpoint/);
+  assert.match(await f.runChecks(src, "git status"), /BLOCKED: 1 mutation checkpoint/);
+  const blocked = await f.requireDurable(src, "pre-approval");
+  assert.match(blocked ?? "", /BLOCKED: 1 mutation checkpoint/);
+  assert.equal(readDebt(dirname(config.auditLog)).length, 1);
+  // remote becomes reachable: the gate's settle attempt ACKs -> operation restored
+  (f as any).deps.config.checkpointRemote = remote;
+  // test files are writable without reproduction evidence: the write proves
+  // the DEBT gate opened (an evidence-gate refusal would be unrelated)
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join((f as any).cloneDir(src), "test"), { recursive: true });
+  const out = await f.writeFile(src, "test/regression.test.sh", "exit 1\n");
+  assert.doesNotMatch(out, /mutation checkpoint/);
+  assert.equal(readDebt(dirname(config.auditLog)).length, 0);
+  assert.equal(await f.requireDurable(src, "pre-approval"), undefined);
+});
