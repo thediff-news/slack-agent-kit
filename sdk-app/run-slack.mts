@@ -1,6 +1,7 @@
 /** Production launcher: budget proxy (hard cap) + Slack surface in one process.
  * Tokens come from the environment (launcher injects them), never from the command line or logs. */
 import { readFileSync } from "node:fs";
+import { recordDebt, settleDebt, syncCheckpoints } from "./src/checkpoint.js";
 import { startBudgetProxy } from "./budget-proxy.mjs";
 import { startSlackApp } from "./src/slack.js";
 import { configFromEnv, evalPreflightProblems } from "./src/config.js";
@@ -31,5 +32,36 @@ if ((process.env.SDK_APP_EVAL_LOCKDOWN || "") === "1") {
   const problems = evalPreflightProblems(cfg);
   if (problems.length) { console.error("[run-slack] EVAL PREFLIGHT FAILED:\n - " + problems.join("\n - ")); process.exit(1); }
   console.log(`[run-slack] EVAL PREFLIGHT OK: repos=${cfg.githubRepos.join(",")} approvers=${cfg.approvers.length} acls=${Object.keys(cfg.userAcls).length} dryRun=${cfg.dryRun} maxTurns=${cfg.maxTurnsPerMessage} browseAllowlist=${cfg.browseAllowlist.join(",")} proxyState=${process.env.SDK_APP_PROXY_STATE}`);
+}
+// Restart guard: the app has no in-process restart path - restarts are
+// operator kill + relaunch. So durability is wired at the two real edges:
+// (a) BOOT: settle any checkpoint debt left by a crash/failed capture; a
+//     failure is logged loudly and the debt gates the next work step.
+// (b) SHUTDOWN: SIGTERM/SIGINT trigger a bounded pre-restart sync of the whole
+//     checkpoint store (covers every captured mutation); failure is recorded
+//     as debt so the next boot/next work step blocks until it is durable.
+const ckptStateDir = (process.env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.jsonl").replace(/[^/]+$/, "");
+const ckptRemote = process.env.SDK_APP_CHECKPOINT_REMOTE;
+const ckptAuthor = { name: "sdk-app-checkpoint", email: "checkpoint@localhost" };
+if (ckptRemote) {
+  const boot = await settleDebt(ckptStateDir, ckptRemote, "auto-checkpoints", ckptAuthor);
+  if (!boot.cleared) console.error(`[run-slack] CHECKPOINT DEBT at boot: ${boot.pending} unsaved capture(s); sync failed: ${(boot.error ?? "").slice(0, 150)} - the next work step will BLOCK until the checkpoint remote is reachable`);
+  let restarting = false;
+  const preRestart = (sig: string) => {
+    if (restarting) return;
+    restarting = true;
+    console.log(`[run-slack] ${sig}: pre-restart checkpoint sync (bounded 20s)`);
+    const killer = setTimeout(() => { console.error("[run-slack] pre-restart checkpoint TIMED OUT; exiting with debt recorded"); process.exit(1); }, 20000);
+    syncCheckpoints({ stateDir: ckptStateDir, remote: ckptRemote, branch: "auto-checkpoints", author: ckptAuthor })
+      .then((sync) => {
+        if (!sync.ok) {
+          recordDebt(ckptStateDir, { repo: "(pre-restart)", reason: "pre-restart", at: new Date().toISOString(), error: `shutdown sync failed: ${(sync.error ?? "").slice(0, 200)}` });
+          console.error("[run-slack] pre-restart checkpoint FAILED; recorded as debt - next boot reports it and the next work step is gated");
+        } else console.log("[run-slack] pre-restart checkpoint durable");
+      })
+      .finally(() => { clearTimeout(killer); process.exit(0); });
+  };
+  process.on("SIGTERM", () => preRestart("SIGTERM"));
+  process.on("SIGINT", () => preRestart("SIGINT"));
 }
 await startSlackApp();

@@ -11,7 +11,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync , rmSync } from "node:fs";
 import { basename, join } from "node:path";
 
 const run = promisify(execFile);
@@ -106,7 +106,6 @@ export async function syncCheckpoints(opts: { stateDir: string; remote: string; 
   const git = (args: string[]) => run("git", ["-C", dir, ...args]);
   if (!existsSync(join(dir, ".git"))) {
     await git(["init", "-q", "-b", opts.branch]);
-    await git(["remote", "add", "origin", opts.remote]);
   }
   await git(["add", "-A"]);
   const { stdout: status } = await git(["status", "--porcelain"]);
@@ -116,7 +115,9 @@ export async function syncCheckpoints(opts: { stateDir: string; remote: string; 
     commit = (await git(["rev-parse", "HEAD"])).stdout.trim().slice(0, 8);
   }
   try {
-    await git(["push", "-q", "-u", "origin", `${opts.branch}:${opts.branch}`]);
+    // Push to the explicit URL, never a cached origin: an earlier sync attempt
+    // against a dead remote must not stick and swallow every later settle.
+    await git(["push", "-q", opts.remote, `${opts.branch}:refs/heads/${opts.branch}`]);
     return { ok: true, acked: true, commit };
   } catch (e) {
     return { ok: false, acked: false, error: String(e).slice(0, 300) };
@@ -142,6 +143,37 @@ export type MeterProjection = {
   totals: { acceptedBound: number; settledMeasured: number; released: number; heldBound: number; provableZero: number; unknownCount: number };
   requests: Record<string, { state: string; bound: number; measured?: number }>;
 };
+
+
+/** Checkpoint debt: a mutation capture that could NOT be durably saved (local
+ * capture failed, or the remote ACK failed) is recorded as debt. The next
+ * mutation tool, approval pause, or restart MUST settle the debt (successful
+ * remote sync) before proceeding - best-effort capture failure must never be
+ * silently ignored while work continues. */
+export interface DebtEntry { repo: string; reason: string; at: string; error: string }
+export function debtPath(stateDir: string): string { return join(stateDir, "checkpoint-debt.json"); }
+export function readDebt(stateDir: string): DebtEntry[] {
+  try { const d = JSON.parse(readFileSync(debtPath(stateDir), "utf8")); return Array.isArray(d.pending) ? d.pending : []; } catch { return []; }
+}
+export function recordDebt(stateDir: string, e: DebtEntry): void {
+  const pending = [...readDebt(stateDir), e].slice(-50);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(debtPath(stateDir) + ".tmp", JSON.stringify({ version: 1, pending }, null, 1));
+  renameSync(debtPath(stateDir) + ".tmp", debtPath(stateDir));
+}
+export function clearDebt(stateDir: string): void {
+  try { rmSync(debtPath(stateDir)); } catch { /* already clear */ }
+}
+/** Attempt to settle outstanding debt: one remote sync covers every pending
+ * entry (checkpoints accumulate in the same local store). Clears the marker
+ * only on an ACKed sync. */
+export async function settleDebt(stateDir: string, remote: string, branch: string, author: { name: string; email: string }): Promise<{ cleared: boolean; pending: number; error?: string }> {
+  const pending = readDebt(stateDir);
+  if (pending.length === 0) return { cleared: true, pending: 0 };
+  const sync = await syncCheckpoints({ stateDir, remote, branch, author });
+  if (sync.ok) { clearDebt(stateDir); return { cleared: true, pending: 0 }; }
+  return { cleared: false, pending: pending.length, error: sync.error };
+}
 
 export function buildMeterProjection(events: { ev: string; reqId: string; bound?: number; measured?: number; parsed?: boolean; complete?: boolean; decision?: string }[], reconcile: (ev: never[]) => { requests: Record<string, { state: string; bound: number; measured?: number }>; totals: MeterProjection["totals"] }, cumulative: number, basis: number): MeterProjection {
   const { requests: reservations, totals } = reconcile(events as never[]);

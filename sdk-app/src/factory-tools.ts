@@ -5,7 +5,7 @@
  * a PR is approval-gated + dry-run unless armed. Never merges, never
  * pushes to main. */
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { captureCheckpoint, syncCheckpoints, type CaptureOpts } from "./checkpoint.js";
+import { captureCheckpoint, syncCheckpoints, recordDebt, readDebt, settleDebt, type CaptureOpts } from "./checkpoint.js";
 import { appServerInvocation, checkEvalCommand, lockdownInvocation, EVAL_SAFE_CMD, type SandboxKind } from "./eval-lockdown.js";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -272,9 +272,37 @@ export class FactoryTools {
    * transitions (requireDurable). */
   private async checkpoint(repo: string, reason: CaptureOpts["reason"], evidenceFiles?: string[]): Promise<void> {
     this.lastActiveRepo = repo;
+    const stateDir = dirname(this.deps.config.auditLog);
+    const author = { name: "sdk-app-checkpoint", email: "checkpoint@localhost" };
     try {
-      await captureCheckpoint({ stateDir: dirname(this.deps.config.auditLog), repo, dir: this.cloneDir(repo), reason, evidenceFiles, cost: this.costProjection() });
-    } catch { /* local capture is best-effort; critical paths use requireDurable */ }
+      const cap = await captureCheckpoint({ stateDir, repo, dir: this.cloneDir(repo), reason, evidenceFiles, cost: this.costProjection() });
+      if (!cap.ok) {
+        recordDebt(stateDir, { repo, reason, at: new Date().toISOString(), error: `capture refused: ${(cap.refused ?? []).join("; ").slice(0, 300)}` });
+        return;
+      }
+      if (this.deps.config.checkpointRemote) {
+        const sync = await syncCheckpoints({ stateDir, remote: this.deps.config.checkpointRemote, branch: "auto-checkpoints", author });
+        if (!sync.ok) recordDebt(stateDir, { repo, reason, at: new Date().toISOString(), error: `sync failed: ${(sync.error ?? "").slice(0, 300)}` });
+        else await settleDebt(stateDir, this.deps.config.checkpointRemote, "auto-checkpoints", author); // a good sync also heals older debt
+      }
+    } catch (e) {
+      recordDebt(stateDir, { repo, reason, at: new Date().toISOString(), error: `capture error: ${String(e).slice(0, 300)}` });
+    }
+  }
+
+  /** Checkpoint-debt gate: a mutation capture that was never durably saved
+   * blocks the NEXT mutation / approval until a remote sync ACKs. Returns a
+   * BLOCKED message, or undefined when the ledger is clean. */
+  private async debtGate(): Promise<string | undefined> {
+    const stateDir = dirname(this.deps.config.auditLog);
+    const pending = readDebt(stateDir);
+    if (pending.length === 0) return undefined;
+    if (this.deps.config.checkpointRemote) {
+      const settled = await settleDebt(stateDir, this.deps.config.checkpointRemote, "auto-checkpoints", { name: "sdk-app-checkpoint", email: "checkpoint@localhost" });
+      if (settled.cleared) return undefined;
+      return `BLOCKED: ${settled.pending} mutation checkpoint(s) are not durably saved and the remote sync just failed again (${(settled.error ?? "").slice(0, 150)}). Refusing the next work step until the checkpoint remote is reachable - earlier work would be lost on a reset.`;
+    }
+    return `BLOCKED: ${pending.length} mutation checkpoint(s) are not durably saved and SDK_APP_CHECKPOINT_REMOTE is unset - refusing the next work step until checkpoint sync is configured.`;
   }
 
   /** Sanitized cost projection: cumulative + preserved unknown/held markers.
@@ -304,6 +332,8 @@ export class FactoryTools {
    * is unset the guard performs the local capture and reports the missing
    * configuration instead of silently passing. */
   async requireDurable(repo: string, reason: CaptureOpts["reason"], requestId?: string): Promise<string | undefined> {
+    const debtBlock = await this.debtGate();
+    if (debtBlock) return debtBlock;
     const stateDir = dirname(this.deps.config.auditLog);
     const cap = await captureCheckpoint({ stateDir, repo, dir: this.cloneDir(repo), reason, requestId, cost: this.costProjection() });
     if (!cap.ok) return `BLOCKED: durable checkpoint REFUSED: ${(cap.refused ?? []).join("; ")}`;
@@ -391,6 +421,8 @@ export class FactoryTools {
   }
 
   async writeFile(repo: string, path: string, content: string): Promise<string> {
+    const debtBlock = await this.debtGate();
+    if (debtBlock) return debtBlock;
     const p = this.guardPath(repo, path);
     const st = this.loadWf(repo);
     const isTest = TEST_PATH.test(path);
@@ -427,6 +459,8 @@ export class FactoryTools {
   }
 
   async runChecks(repo: string, cmd: string): Promise<string> {
+    const debtBlock = await this.debtGate();
+    if (debtBlock) return debtBlock;
     const lockdown = this.deps.config.evalLockdown;
     const cmdOk = lockdown ? EVAL_SAFE_CMD.test(cmd.trim()) : SAFE_CMD.test(cmd);
     if (!cmdOk) return `BLOCKED: command not in the ${lockdown ? "eval" : "factory"} allowlist (repo's own test/typecheck/build/git commands only): ${cmd}`;

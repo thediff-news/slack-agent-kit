@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureCheckpoint, syncCheckpoints } from "../src/checkpoint.js";
+import { captureCheckpoint, syncCheckpoints, recordDebt, readDebt, clearDebt, settleDebt } from "../src/checkpoint.js";
 
 const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
@@ -123,4 +123,41 @@ test("restore proof: delete scratch, restore from checkpoint remote, exact bytes
   assert.equal(sha256(readFileSync(join(dir2, "test", "regression.test.js"))), cp.untracked[0].sha256);
   assert.equal(sha256(Buffer.from(cp.evidence[0].b64, "base64")), sha256(img));
   assert.ok(cp.cost.cumulative <= 9.64 && cp.cost.cumulative >= 9.63);
+});
+
+test("debt: record/read/clear round-trip", () => {
+  const { stateDir } = fixture();
+  assert.deepEqual(readDebt(stateDir), []);
+  recordDebt(stateDir, { repo: "o/n", reason: "mutation", at: "t1", error: "sync failed: dead remote" });
+  recordDebt(stateDir, { repo: "o/n", reason: "mutation", at: "t2", error: "capture error: boom" });
+  const d = readDebt(stateDir);
+  assert.equal(d.length, 2);
+  assert.equal(d[0].error, "sync failed: dead remote");
+  clearDebt(stateDir);
+  assert.deepEqual(readDebt(stateDir), []);
+});
+
+test("debt: settle refuses with a dead remote, clears only on an ACKed sync", async () => {
+  const { dir, stateDir } = fixture();
+  const author = { name: "t", email: "t@t" };
+  const cap = await captureCheckpoint({ stateDir, repo: "o/n", dir, reason: "mutation" });
+  assert.equal(cap.ok, true);
+  recordDebt(stateDir, { repo: "o/n", reason: "mutation", at: "t1", error: "sync failed: dead remote" });
+  // dead remote: debt stays, error reported
+  const fail = await settleDebt(stateDir, "file:///nonexistent/never.git", "auto-checkpoints", author);
+  assert.equal(fail.cleared, false);
+  assert.equal(fail.pending, 1);
+  assert.ok(readDebt(stateDir).length === 1);
+  // reachable remote: the sync covers the pending capture, debt clears
+  const remote = join(stateDir, "..", "remote.git");
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  const ok = await settleDebt(stateDir, remote, "auto-checkpoints", author);
+  assert.equal(ok.cleared, true);
+  assert.deepEqual(readDebt(stateDir), []);
+  // and the checkpoint really landed on the remote
+  const ls = execFileSync("git", ["--git-dir", remote, "ls-tree", "-r", "--name-only", "auto-checkpoints"], { encoding: "utf8" });
+  assert.match(ls, /o_n-.*\.json/);
+  // already-clean settle is a no-op success
+  const noop = await settleDebt(stateDir, "file:///nonexistent/never.git", "auto-checkpoints", author);
+  assert.equal(noop.cleared, true);
 });

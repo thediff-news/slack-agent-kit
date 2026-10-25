@@ -165,7 +165,10 @@ test("durability: settle updates the meter projection idempotently, no secrets/b
   const { syncMeter, buildMeterProjection } = await import("../src/checkpoint.js");
   const { reconcileJournal: rec } = await import("../budget-proxy.mjs");
   const events = readFileSync(journalPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  await syncMeter({ stateDir, remote, projection: buildMeterProjection(events, rec as never, 0, 0) });
+  // rebuild the projection with the LIVE cumulative/basis (same inputs the
+  // proxy's own sync used), otherwise the content legitimately differs
+  const prior = JSON.parse(proj);
+  await syncMeter({ stateDir, remote, projection: buildMeterProjection(events, rec as never, prior.cumulative, prior.basis) });
   const head2 = execFileSync("git", ["--git-dir", remote, "rev-parse", "auto-checkpoints"], { encoding: "utf8" });
   assert.equal(head2, head1);
   p.close(); up.close();
