@@ -12,7 +12,11 @@ import http from "node:http";
 import { HttpPlanner } from "../src/browse/planner.js";
 
 test("HttpPlanner.plan gives up after BROWSE_MODEL_TIMEOUT_MS and returns a fail step", async () => {
+  // accept-and-never-reply server; track sockets so teardown frees the
+  // planner's pending fetch (otherwise the harness waits out its 240s kill).
+  const socks = new Set<import("node:net").Socket>();
   const server = http.createServer(() => { /* accept and never reply */ });
+  server.on("connection", (s) => { socks.add(s); s.on("close", () => socks.delete(s)); });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as any).port;
   process.env.BROWSE_MODEL_TIMEOUT_MS = "400";
@@ -25,6 +29,7 @@ test("HttpPlanner.plan gives up after BROWSE_MODEL_TIMEOUT_MS and returns a fail
     assert.equal(step.kind, "fail");
     assert.match((step as any).reason, /timeout/i);
   } finally {
+    for (const s of socks) s.destroy();
     server.close();
   }
 });
