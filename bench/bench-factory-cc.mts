@@ -14,15 +14,22 @@ const maxTurns = Number(process.argv[3] || "8"); // output-capped turns keep con
 // budget guards (SDK estimate stop per round + cumulative total with in-flight reserve)
 const roundBudget = Number(process.env.CLAUDE_ROUND_BUDGET_USD || "0.60");
 const totalBudget = Number(process.env.CLAUDE_TOTAL_BUDGET_USD || "1.90");
-const base = openAiFromEnv()!.llm;
-const llm = { model: process.env.OPENAI_CHAT_MODEL ?? "gpt-5", get lastUsage() { return base.lastUsage; }, chat: (msgs: any, _opts?: any) => base.chat(msgs, { reasoningEffort: "low" as any }) };
+// FACTORY_STUB_STAGES=1: deterministic non-code stages (CHANGED benchmark
+// conditions, zero paid OpenAI calls); otherwise live gpt-5 stages.
+import { stubLlm } from "./stub-llm.mjs";
+const useStub = process.env.FACTORY_STUB_STAGES === "1";
+const base = useStub ? null : openAiFromEnv()!.llm;
+const llm = useStub
+  ? stubLlm()
+  : { model: process.env.OPENAI_CHAT_MODEL ?? "gpt-5", get lastUsage() { return base!.lastUsage; }, chat: (msgs: any, _opts?: any) => base!.chat(msgs, { reasoningEffort: "low" as any }) };
+const stageLlms = useStub ? { triage: stubLlm(), plan: stubLlm(), repro: stubLlm(), review: stubLlm() } : undefined;
 const audit: { ts: number; event: string; detail: string }[] = [];
 const t0 = Date.now();
 const request = "the browse planner (HttpPlanner in src/browse/planner.ts) calls the model endpoint with fetch but sets no timeout. If the endpoint accepts the connection and never replies, plan() hangs forever and the whole browse run stalls until the loop time cap. Expected: plan() gives up after a configurable timeout (env BROWSE_MODEL_TIMEOUT_MS, default around 60s) and returns a fail step with the timeout in the reason.";
 try {
   const res = await Promise.race([
     runFactory({
-      repo: "thediff-news/slack-agent-kit", request, llm: llm as any, maxEditRounds: 3,
+      repo: "thediff-news/slack-agent-kit", request, llm: llm as any, ...(stageLlms ? { llms: stageLlms as any } : {}), maxEditRounds: 3,
       codeEngine: "claude" as const, claudeModel: model, claudeMaxTurns: maxTurns, claudeSandbox: true, claudeMaxBudgetUsd: roundBudget, claudeTotalBudgetUsd: totalBudget,
       hooks: { audit: (event, detail) => audit.push({ ts: Date.now() - t0, event, detail }), approvePlan: async () => true, note: () => {} },
       openPr: async () => "bench://no-pr",
