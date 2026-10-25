@@ -61,3 +61,25 @@ test("real browser: open, read, screenshot against a local page", async () => {
   assert.equal(Buffer.from(shot, "base64").subarray(1, 4).toString(), "PNG");
   await b.close();
 });
+
+test("real browser: DEAD session (browser process killed) auto-recovers on next call", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "browse-crash-"));
+  const policy = new BrowsePolicy(join(dir, "allow.json"), ["127.0.0.1"]);
+  const audit = new AuditLog(join(dir, "audit.jsonl"));
+  const b = new BrowseTools({ audit, policy, downloadsDir: dir });
+  const opened = await b.open(base);
+  assert.match(opened, /Hello fixture/);
+  // simulate the crash: kill the underlying browser behind BrowseTools' back
+  const session = (b as any).session;
+  assert.ok(session?.browser, "session has a browser");
+  await session.browser.close(); // abrupt teardown; BrowseTools is not notified
+  assert.equal(session.browser.isConnected(), false, "browser is really dead");
+  // next call must relaunch instead of failing forever
+  const reopened = await b.open(base);
+  assert.match(reopened, /Hello fixture/, "browsing works again after relaunch");
+  const shot = await b.screenshotBase64();
+  assert.ok(shot.length > 500, "screenshot works after relaunch");
+  const log = (await import("node:fs")).readFileSync(join(dir, "audit.jsonl"), "utf8");
+  assert.match(log, /browse_relaunch/, "relaunch is audited");
+  await (b as any).session?.close?.();
+});
