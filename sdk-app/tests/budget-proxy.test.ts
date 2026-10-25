@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { startBudgetProxy, extractUsage, settledCostUsd } from "../budget-proxy.mjs";
+import { startBudgetProxy, extractUsage, settledCostUsd, reconcileJournal } from "../budget-proxy.mjs";
 
 type Mode = "json" | "sse" | "nousage" | "huge" | "huge-hi" | "sse-gzip" | "sse-truncated";
 async function mockUpstream(mode: Mode = "json"): Promise<{ port: number; close: () => void }> {
@@ -230,4 +230,73 @@ test("budget proxy: tiered model settles at the HIGH tier when the actual prompt
   const spent = p.spentBoundUsd();
   assert.ok(Math.abs(spent - 0.06024) < 1e-9, `settled ${spent} at high tier`);
   p.close(); up.close();
+});
+
+test("journal: gate rejection (cap) is recorded and never added to the ledger", async () => {
+  const up = await mockUpstream("json");
+  const dir = mkdtempSync(join(tmpdir(), "bp-journal-"));
+  const jp = join(dir, "journal.jsonl");
+  // cap below one reservation -> the very first request is rejected
+  const p = await startBudgetProxy(cfg(up.port, { totalUsd: 0.01, journalPath: jp }));
+  const r = await post(p.port, "/v1/messages", msg);
+  assert.equal(r.status, 429);
+  const events = readFileSync(jp, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].ev, "gate");
+  assert.equal(events[0].decision, "rejected_cap");
+  const rec = reconcileJournal(events);
+  assert.equal(rec.totals.provableZero, 1);
+  assert.equal(rec.totals.acceptedBound, 0);
+  assert.equal(rec.totals.heldBound, 0);
+  p.close(); up.close();
+});
+
+test("journal: accepted request settles to measured and reconciles with release", async () => {
+  const up = await mockUpstream("sse");
+  const dir = mkdtempSync(join(tmpdir(), "bp-journal-"));
+  const jp = join(dir, "journal.jsonl");
+  const p = await startBudgetProxy(cfg(up.port, { journalPath: jp }));
+  const r = await post(p.port, "/v1/messages", msg);
+  assert.equal(r.status, 200);
+  await settle();
+  const events = readFileSync(jp, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const kinds = events.map((e: any) => e.ev);
+  assert.deepEqual(kinds, ["gate", "upstream", "settle"]);
+  const rec = reconcileJournal(events);
+  const states = Object.values(rec.requests).map((x) => x.state);
+  assert.deepEqual(states, ["settled_measured"]);
+  assert.equal(rec.totals.unknownCount, 0);
+  assert.ok(rec.totals.released > 0, "bound released down to measured");
+  assert.ok(rec.totals.settledMeasured > 0);
+  p.close(); up.close();
+});
+
+test("journal: truncated SSE and unparseable response classify as kept-bound unknowns; retries get distinct ids", async () => {
+  const up = await mockUpstream("sse-truncated");
+  const dir = mkdtempSync(join(tmpdir(), "bp-journal-"));
+  const jp = join(dir, "journal.jsonl");
+  const p = await startBudgetProxy(cfg(up.port, { journalPath: jp }));
+  await post(p.port, "/v1/messages", msg);
+  await post(p.port, "/v1/messages", msg); // retry: second reservation
+  await settle();
+  const events = readFileSync(jp, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const rec = reconcileJournal(events);
+  const ids = Object.keys(rec.requests);
+  assert.equal(ids.length, 2, "each attempt is its own reservation");
+  assert.ok(ids[0] !== ids[1]);
+  for (const id of ids) assert.equal(rec.requests[id].state, "kept_bound_incomplete");
+  assert.equal(rec.totals.unknownCount, 2);
+  assert.ok(Math.abs(rec.totals.heldBound - 2 * perReq) < 1e-9);
+  p.close(); up.close();
+
+  const up2 = await mockUpstream("nousage");
+  const dir2 = mkdtempSync(join(tmpdir(), "bp-journal-"));
+  const jp2 = join(dir2, "journal.jsonl");
+  const p2 = await startBudgetProxy(cfg(up2.port, { journalPath: jp2 }));
+  await post(p2.port, "/v1/messages", msg);
+  await settle();
+  const rec2 = reconcileJournal(readFileSync(jp2, "utf8").trim().split("\n").map((l) => JSON.parse(l)));
+  assert.deepEqual(Object.values(rec2.requests).map((x) => x.state), ["kept_bound_unparseable"]);
+  assert.equal(rec2.totals.unknownCount, 1);
+  p2.close(); up2.close();
 });

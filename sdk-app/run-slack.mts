@@ -19,6 +19,7 @@ const proxy = await startBudgetProxy({
   rates: rates0,
   upstreamBase: "https://api.anthropic.com", realKey,
   statePath: process.env.SDK_APP_PROXY_STATE || undefined,
+  journalPath: process.env.SDK_APP_PROXY_JOURNAL || (process.env.SDK_APP_PROXY_STATE ? process.env.SDK_APP_PROXY_STATE.replace(/\.json$/, '') + '-journal.jsonl' : undefined),
   basisUsd: Number(process.env.SDK_APP_PROXY_BASIS_USD || "0"),
 });
 process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}`;

@@ -29,7 +29,7 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 import { once } from "node:events";
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export interface ProxyConfig {
@@ -50,6 +50,63 @@ export interface ProxyConfig {
   /** Conservative spend that happened OUTSIDE this ledger (prior sessions,
    * unsettled reservations): counted against the cap from the first request. */
   basisUsd?: number;
+  /** Optional append-only per-request journal (JSONL): gate/upstream/settle
+   * events with stable request ids, so held reservations can later be
+   * classified (settled / unparseable / incomplete / rejected / aborted)
+   * instead of sitting in the ledger as one unexplained number. */
+  journalPath?: string;
+}
+
+export type JournalEvent = {
+  ev: "gate" | "upstream" | "upstream_error" | "settle";
+  reqId: string;
+  ts: string;
+  // gate
+  decision?: "accepted" | "rejected_cap" | "rejected_model" | "rejected_price" | "rejected_tool" | "rejected_count" | "rejected_badjson";
+  model?: string; counted_input?: number; max_tokens?: number; bound?: number; cumulative_after?: number;
+  // upstream
+  status?: number;
+  message?: string;
+  // settle
+  via?: "end" | "close"; bytes?: number; decompressed?: boolean; parsed?: boolean; complete?: boolean;
+  measured?: number; released?: number;
+};
+
+/** Final per-request classification folded from journal events. */
+export type ReservationState =
+  | "gate_rejected"          // never forwarded: provably zero liability
+  | "settled_measured"       // complete usage evidence; bound released down to measured
+  | "kept_bound_unparseable" // upstream responded, usage unreadable: unknown liability, bound held
+  | "kept_bound_incomplete"  // truncated stream: unknown liability, bound held
+  | "upstream_error"         // forwarding failed: bound held (request may or may not have reached upstream)
+  | "in_flight_or_aborted";  // accepted, no terminal event recorded (shutdown/disconnect): unknown
+
+export function reconcileJournal(events: JournalEvent[]): {
+  requests: Record<string, { state: ReservationState; bound: number; measured?: number }>;
+  totals: { acceptedBound: number; settledMeasured: number; released: number; heldBound: number; provableZero: number; unknownCount: number };
+} {
+  const requests: Record<string, { state: ReservationState; bound: number; measured?: number }> = {};
+  for (const e of events) {
+    const r = (requests[e.reqId] ??= { state: "in_flight_or_aborted", bound: 0 });
+    if (e.ev === "gate") {
+      if (e.decision === "accepted") { r.state = "in_flight_or_aborted"; r.bound = e.bound ?? 0; }
+      else { r.state = "gate_rejected"; r.bound = 0; }
+    } else if (e.ev === "upstream_error") {
+      r.state = "upstream_error";
+    } else if (e.ev === "settle") {
+      if (e.parsed && e.complete && e.measured !== undefined) { r.state = "settled_measured"; r.measured = e.measured; }
+      else if (e.parsed && !e.complete) r.state = "kept_bound_incomplete";
+      else r.state = "kept_bound_unparseable";
+    }
+  }
+  const totals = { acceptedBound: 0, settledMeasured: 0, released: 0, heldBound: 0, provableZero: 0, unknownCount: 0 };
+  for (const r of Object.values(requests)) {
+    if (r.state === "gate_rejected") { totals.provableZero += 1; continue; }
+    totals.acceptedBound += r.bound;
+    if (r.state === "settled_measured") { totals.settledMeasured += r.measured ?? 0; totals.released += r.bound - (r.measured ?? 0); }
+    else { totals.heldBound += r.bound; totals.unknownCount += 1; }
+  }
+  return { requests, totals };
 }
 
 /** Per-request upper bound in USD. count_tokens is documented as an estimate
@@ -200,6 +257,12 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
   }
   const basis = cfg.basisUsd ?? 0;
   if (cfg.statePath) mkdirSync(dirname(cfg.statePath), { recursive: true });
+  if (cfg.journalPath) mkdirSync(dirname(cfg.journalPath), { recursive: true });
+  let reqSeq = 0;
+  const journal = (e: Omit<JournalEvent, "ts">) => {
+    if (!cfg.journalPath) return;
+    try { appendFileSync(cfg.journalPath, JSON.stringify({ ...e, ts: new Date().toISOString() }) + "\n"); } catch { /* journal must never break the gate */ }
+  };
   const persist = () => {
     if (!cfg.statePath) return;
     const tmp = cfg.statePath + ".tmp";
@@ -222,16 +285,19 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
         return;
       }
       // gate POST /v1/messages
+      const reqId = `bp-${Date.now().toString(36)}-${++reqSeq}`;
       let body: any;
-      try { body = JSON.parse(raw); } catch { clientRes.writeHead(400).end('{"error":"bad json"}'); return; }
+      try { body = JSON.parse(raw); } catch { journal({ ev: "gate", reqId, decision: "rejected_badjson" }); clientRes.writeHead(400).end('{"error":"bad json"}'); return; }
       const allowedModels = cfg.model.split(",").map((m) => m.trim()).filter(Boolean);
       if (!allowedModels.includes(body.model)) {
+        journal({ ev: "gate", reqId, decision: "rejected_model", model: String(body.model ?? "") });
         clientRes.writeHead(403, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_model", message: `budget proxy allows only ${cfg.model}, got ${body.model}` } }));
         return;
       }
       const rate = cfg.rates?.[body.model] ?? (body.model === allowedModels[0] ? { input: cfg.inputRatePerMTok, output: cfg.outputRatePerMTok } : undefined);
       if (!rate) {
+        journal({ ev: "gate", reqId, decision: "rejected_price", model: String(body.model ?? "") });
         clientRes.writeHead(403, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_price", message: `no verified price configured for ${body.model}; refusing to guess a spend bound` } }));
         return;
@@ -247,6 +313,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
           : { inputRatePerMTok: rate.input, outputRatePerMTok: rate.output };
       const serverTool = (body.tools ?? []).find((t: any) => /web_search|web_fetch|code_execution/i.test(String(t?.type ?? "")));
       if (serverTool) {
+        journal({ ev: "gate", reqId, decision: "rejected_tool", model: String(body.model ?? "") });
         clientRes.writeHead(403, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_tool", message: `server-billed tool ${serverTool.type} rejected by budget proxy` } }));
         return;
@@ -272,6 +339,7 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       const countBody = JSON.stringify({ model: body.model, messages: stripForCount(body.messages), ...(body.system ? { system: stripForCount(body.system) } : {}), ...(body.tools ? { tools: stripForCount(body.tools) } : {}), ...(body.thinking ? { thinking: body.thinking } : {}) });
       const cr = await upstreamJson(cfg, "/v1/messages/count_tokens", countBody);
       if (cr.status !== 200) {
+        journal({ ev: "gate", reqId, decision: "rejected_count", model: String(body.model ?? "") });
         clientRes.writeHead(502, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_proxy_count", message: `count_tokens ${cr.status}: ${cr.body.slice(0, 200)}` } }));
         return;
@@ -281,13 +349,22 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
       console.log(`[budget-proxy] ${new Date().toISOString()} gate req counted_input=${inputTokens} max_tokens=${body.max_tokens} bound_usd=${boundExact.toFixed(6)} cumulative_before_usd=${cumulative.toFixed(6)}`);
       const bound = boundExact;
       if (basis + cumulative + bound > cfg.totalUsd) {
+        journal({ ev: "gate", reqId, decision: "rejected_cap", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound });
         clientRes.writeHead(429, { "content-type": "application/json" });
         clientRes.end(JSON.stringify({ type: "error", error: { type: "budget_exceeded", message: `budget proxy hard cap: bound $${bound.toFixed(4)} would exceed cumulative cap $${cfg.totalUsd} (bound so far $${cumulative.toFixed(4)})` } }));
         return;
       }
       cumulative += bound; // charged conservatively BEFORE forwarding; actual <= bound
       persist();
-      const r = await upstreamRaw(cfg, url, JSON.stringify(body));
+      journal({ ev: "gate", reqId, decision: "accepted", model: String(body.model ?? ""), counted_input: inputTokens, max_tokens: body.max_tokens, bound, cumulative_after: cumulative });
+      let r: Awaited<ReturnType<typeof upstreamRaw>>;
+      try {
+        r = await upstreamRaw(cfg, url, JSON.stringify(body));
+      } catch (e) {
+        journal({ ev: "upstream_error", reqId, message: (e as Error).message.slice(0, 200) });
+        throw e;
+      }
+      journal({ ev: "upstream", reqId, status: r.status });
       clientRes.writeHead(r.status, r.headers);
       // Tap the response for usage, then settle the reservation down to the
       // measured cost when the stream ends. Settlement only ever LOWERS the
@@ -311,12 +388,15 @@ export async function startBudgetProxy(cfg: ProxyConfig): Promise<{ port: number
           const isSse = /^event:/m.test(text);
           const complete = isSse ? /"type"\s*:\s*"message_stop"/.test(text) : usage !== null;
           console.log(`[budget-proxy] ${new Date().toISOString()} settle_attempt via=${via} bytes=${raw.length} decompressed=${decompressed} parsed=${usage ? "yes" : "no"} complete=${complete}`);
-          if (!usage || !complete) return; // safe direction: unknown liability keeps the bound
+          if (!usage || !complete) { journal({ ev: "settle", reqId, via, bytes: raw.length, decompressed, parsed: !!usage, complete }); return; } // safe direction: unknown liability keeps the bound
           const settled = settledCostUsd(usage, settleCfgFor(usage));
           if (settled < bound) {
             cumulative = cumulative - bound + settled;
             persist();
+            journal({ ev: "settle", reqId, via, bytes: raw.length, decompressed, parsed: true, complete: true, measured: settled, released: bound - settled });
             console.log(`[budget-proxy] ${new Date().toISOString()} settle req bound_usd=${bound.toFixed(6)} -> measured_bound_usd=${settled.toFixed(6)} (in=${usage.input} cw=${usage.cacheWrite} cr=${usage.cacheRead} out=${usage.output}) cumulative_usd=${cumulative.toFixed(6)}`);
+          } else {
+            journal({ ev: "settle", reqId, via, bytes: raw.length, decompressed, parsed: true, complete: true, measured: settled, released: 0 });
           }
         };
         const enc = String(r.headers["content-encoding"] ?? "");
