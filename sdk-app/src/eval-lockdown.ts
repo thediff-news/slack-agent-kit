@@ -40,6 +40,12 @@ export const EVAL_SAFE_CMD = new RegExp(
   "^(?!.*(\\$\\(|\\`|>|<))(" +
     "npm (test|run (test[\\w:-]*|typecheck|build|report|render))" +
     "|npm ci\\b[^\\n;|&]*" +
+    // Offline native-module self-repair: a dependency whose prebuilt binary
+    // cannot download in the network-isolated sandbox can be rebuilt from
+    // source (toolchain + node headers are ro-bound). Scoped to explicit
+    // package names; same script-execution exposure as the already-allowed
+    // npm ci. node-gyp finds headers via --nodedir=/usr.
+    "|npm rebuild( [\\w@./-]+)+\\b[^\\n;|&]*" +
     "|npx (tsc|tsx --test\\b.*)" +
     "|pytest\\b[^\\n;|&]*" +
     "|python3? -m pytest\\b[^\\n;|&]*" +

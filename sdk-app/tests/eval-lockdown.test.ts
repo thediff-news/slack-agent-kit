@@ -111,6 +111,14 @@ test("eval lockdown: pnpm offline install + vitest allowed, injection still bloc
   }
 });
 
+test("eval allowlist permits scoped npm rebuild for offline native self-repair", () => {
+  assert.ok(EVAL_SAFE_CMD.test("npm rebuild @louislam/sqlite3"), "scoped rebuild allowed");
+  assert.ok(EVAL_SAFE_CMD.test("npm rebuild sqlite3 @louislam/sqlite3"), "multiple packages allowed");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild"), "bare rebuild (everything) not allowed");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild x; rm -rf /"), "no chaining");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild $(cat /etc/passwd)"), "no substitution");
+});
+
 test("app server invocation: host net shared, mounts/secrets isolated, stores bound ro", async () => {
   const { appServerInvocation, lockdownInvocation } = await import("../src/eval-lockdown.js");
   const app = appServerInvocation("corepack pnpm dev --host 127.0.0.1 --port 5199", "/tmp/clone");
