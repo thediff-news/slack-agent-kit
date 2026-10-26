@@ -98,26 +98,48 @@ async function clickLocator(loc: Locator): Promise<void> {
   await loc.click({ timeout: 5_000 });
 }
 
+/** Click candidates in priority order. Text CONTENT matches come before
+ * label-associated controls: a union (.or) resolves in DOM order, which can
+ * put a visually-hidden form control (e.g. Bootstrap .btn-check radio with
+ * pointer-events:none, clip rect 0) ahead of its visible styled label - the
+ * click then waits on actionability forever (live: Uptime Kuma setup wizard).
+ * Trying candidates sequentially lets the visible text-carrying label win. */
+function clickCandidates(page: Page, t: Target): Locator[] {
+  if (!t.text) return [resolveTarget(page, t), ...fallbackLocators(page, t)];
+  const text = page.getByText(t.text, { exact: false });
+  const label = page.getByLabel(t.text);
+  const ph = page.getByPlaceholder(t.text);
+  const esc = t.text.replace(/"/g, '\\"');
+  return [
+    text.filter({ visible: true }).first(),
+    label.filter({ visible: true }).first(),
+    ph.filter({ visible: true }).first(),
+    ...fallbackLocators(page, t),
+    page.locator(`label:has-text("${esc}")`).first(),
+    text.first(),
+    label.first(),
+    ph.first(),
+  ];
+}
+
 export async function click(page: Page, t: Target): Promise<ActionResult> {
   try {
     await withRetries(async () => {
-      try {
-        await clickLocator(resolveTarget(page, t));
-      } catch (primaryErr) {
-        // fallback chain: other interactive roles / css has-text carrying the label
-        for (const fb of fallbackLocators(page, t)) {
-          try {
-            await clickLocator(fb);
-            return;
-          } catch { /* try next fallback */ }
+      let firstErr: unknown;
+      for (const cand of clickCandidates(page, t)) {
+        try {
+          await clickLocator(cand);
+          return;
+        } catch (e) {
+          firstErr ??= e;
         }
-        throw primaryErr;
       }
+      throw firstErr ?? new Error("no click candidates");
     });
     await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
     return { ok: true, detail: `clicked ${describe(t)}` };
   } catch (e) {
-    return { ok: false, detail: `click ${describe(t)} failed: ${(e as Error).message.split("\n")[0]}` };
+    return { ok: false, detail: `click ${describe(t)} failed: ${(e as Error).message.split("\n").slice(0, 6).join(" | ").slice(0, 400)}` };
   }
 }
 

@@ -1,0 +1,114 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildToolHandlers, buildKitServer } from "../src/tools.js";
+import { configFromEnv } from "../src/config.js";
+import { AuditLog } from "../src/audit.js";
+import type { Connector, ConnectorDoc } from "../../src/connectors/types.js";
+
+class MockConnector implements Connector {
+  name = "mock";
+  constructor(private docs: ConnectorDoc[]) {}
+  async search(query: string, limit = 10) {
+    return this.docs.filter((d) => (d.title + d.body).toLowerCase().includes(query.toLowerCase())).slice(0, limit);
+  }
+  async get(id: string) {
+    return this.docs.find((d) => d.id === id);
+  }
+}
+
+const setup = (dryRun = true) => {
+  const dir = mkdtempSync(join(tmpdir(), "tools-"));
+  const config = configFromEnv({ SDK_APP_DRY_RUN: dryRun ? "1" : "0" } as any);
+  const audit = new AuditLog(join(dir, "audit.jsonl"));
+  const conn = new MockConnector([
+    { id: "doc-1", title: "Deploy runbook", body: "Rollback: revert the release PR and redeploy.", url: "https://x/1" },
+    { id: "doc-2", title: "On-call", body: "Pager rotation weekly." },
+  ]);
+  return { handlers: buildToolHandlers({ connectors: [conn], config, audit }), config, audit, conn };
+};
+
+test("search_docs finds and formats docs", async () => {
+  const { handlers } = setup();
+  const s = await handlers.searchDocs({ query: "rollback" });
+  assert.match(s.content[0].text, /doc-1/);
+  assert.match(s.content[0].text, /Deploy runbook/);
+  assert.match(s.content[0].text, /https:\/\/x\/1/);
+  const none = await handlers.searchDocs({ query: "zzz-no-match" });
+  assert.match(none.content[0].text, /No matching documents/);
+});
+
+test("get_doc returns full body; unknown id is an error result", async () => {
+  const { handlers } = setup();
+  const g = await handlers.getDoc({ id: "doc-1" });
+  assert.match(g.content[0].text, /revert the release PR/);
+  const nf = await handlers.getDoc({ id: "nope" });
+  assert.equal(nf.isError, true);
+});
+
+test("github_create_issue is dry-run unless armed", async () => {
+  const { handlers } = setup(true);
+  const c = await handlers.createIssue({ repo: "o/r", title: "Bug", body: "details" });
+  assert.match(c.content[0].text, /\[dry-run\] would create issue in o\/r/);
+});
+
+test("kit MCP server builds with all three tools registered", () => {
+  const { config, audit, conn } = setup();
+  const server: any = buildKitServer({ connectors: [conn], config, audit });
+  assert.ok(server, "server instance exists");
+  assert.equal(server.type, "sdk");
+});
+
+test("ARMED github_create_issue executes gh (controlled local fixture, no GitHub)", async () => {
+  const { handlers } = setup(false); // SDK_APP_DRY_RUN=0
+  const oldPath = process.env.PATH;
+  // hermetic: build our own fake `gh` instead of relying on a pre-existing /tmp fixture
+  const { mkdtempSync: mk, writeFileSync: wf, chmodSync } = await import("node:fs");
+  const bin = mk(join(tmpdir(), "fake-bin-"));
+  wf("/tmp/fake-gh-calls.log", "");
+  wf(join(bin, "gh"), '#!/bin/sh\necho "$@" >> /tmp/fake-gh-calls.log\necho https://github.com/thediff-news/slack-agent-kit/issues/999\n');
+  chmodSync(join(bin, "gh"), 0o755);
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const r = await handlers.createIssue({ repo: "o/r", title: "Armed test", body: "armed body" });
+    assert.match(r.content[0].text, /Issue created: https:\/\/github.com\/thediff-news\/slack-agent-kit\/issues\/999/);
+    const { readFileSync } = await import("node:fs");
+    assert.match(readFileSync("/tmp/fake-gh-calls.log", "utf8"), /issue create --repo o\/r --title Armed test --body armed body/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test("get_doc falls back to the RAG store for index source keys, with ACL enforcement", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tools-rag-"));
+  const config = configFromEnv({ SDK_APP_DRY_RUN: "1" } as any);
+  const audit = new AuditLog(join(dir, "audit.jsonl"));
+  const conn = new MockConnector([]);
+  const { openRagStore } = await import("../src/rag-store.js");
+  const ragStore = openRagStore(join(dir, "rag.db"));
+  await ragStore.rag.replace("fs:docs/deploy-runbook.md", "Rollback: revert the release PR.", "public");
+  await ragStore.rag.replace("notion:secret-page", "top secret runbook", "operator-only");
+
+  // public caller: resolves the public fs source key through the RAG fallback
+  const pub = buildToolHandlers({ connectors: [conn], config, audit, ragStore, aclTags: ["public"] });
+  const g = await pub.getDoc({ id: "fs:docs/deploy-runbook.md" });
+  assert.equal(g.isError, undefined);
+  assert.match(g.content[0].text, /revert the release PR/);
+
+  // public caller: private source key is ACL-denied through the same path
+  const denied = await pub.getDoc({ id: "notion:secret-page" });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /Access denied/);
+
+  // operator caller (wildcard): sees the private doc
+  const op = buildToolHandlers({ connectors: [conn], config, audit, ragStore, aclTags: ["*"] });
+  const ok = await op.getDoc({ id: "notion:secret-page" });
+  assert.match(ok.content[0].text, /top secret runbook/);
+
+  // unknown source key still errors
+  const nf = await op.getDoc({ id: "fs:docs/nope.md" });
+  assert.equal(nf.isError, true);
+  ragStore.rag.close();
+});
