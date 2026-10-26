@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,12 +168,47 @@ test("debt: settle refuses with a dead remote, clears only on an ACKed sync", as
 // full real-image pipeline - capture embeds the real bytes, remote sync,
 // delete, clone-back, byte-exact restore. Skips when the file is absent so
 // the suite stays portable; the tiny-image test above always runs.
-const REAL_PNG = "/downloads/shot-1792967048465-0462af89.png";
-test("restore proof (REAL eval PNG, 93KB): capture -> remote -> delete -> clone-back -> byte-exact", { skip: !existsSync(REAL_PNG) }, async () => {
+/** Deterministic LARGE synthetic PNG (labeled: NOT case evidence). The real
+ * 93,607-byte eval screenshot was lost with the 22:54 sandbox and had no
+ * durable copy - the earlier proof synced to a sandbox-local bare remote
+ * only. This generator keeps a large-image restore proof always-on without
+ * pretending to recover that artifact. */
+function makeSyntheticPng(seed: number): Buffer {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc32 = (b: Buffer) => (~b.reduce((c, byte) => (c >>> 8) ^ crcTable[(c ^ byte) & 0xff], -1)) >>> 0;
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const W = 512, H = 384;
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
+  let s0 = seed >>> 0 || 1;
+  const rnd = () => ((s0 = (s0 * 1664525 + 1013904223) >>> 0) >>> 24) & 0xff;
+  const raw = Buffer.alloc(H * (1 + W * 3));
+  let p = 0;
+  for (let y = 0; y < H; y++) { raw[p++] = 0; for (let x = 0; x < W * 3; x++) raw[p++] = rnd(); }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("tEXt", Buffer.from("Description\0SYNTHETIC DURABILITY TEST FIXTURE - NOT CASE EVIDENCE", "latin1")),
+    chunk("IDAT", deflateSync(raw, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+test("restore proof (LARGE SYNTHETIC image, always-on): capture -> remote -> delete -> clone-back -> byte-exact", async () => {
   const { tmp, dir, stateDir } = fixture();
-  const realBytes = readFileSync(REAL_PNG);
-  assert.equal(realBytes.length, 93607); // the actual artifact, not a substitute
-  const evidencePath = join(tmp, "agent-after-proof.png");
+  const realBytes = makeSyntheticPng(6068);
+  assert.ok(realBytes.length > 93607, `synthetic fixture must stay large (got ${realBytes.length}B) - no shrinking the proof to a tiny fixture`);
+  const evidencePath = join(tmp, "synthetic-fixture-NOT-case-evidence.png");
   writeFileSync(evidencePath, realBytes);
   const remote = join(tmp, "remote.git");
   execFileSync("git", ["init", "-q", "--bare", remote]);
@@ -180,7 +216,7 @@ test("restore proof (REAL eval PNG, 93KB): capture -> remote -> delete -> clone-
   assert.equal(cap.ok, true, JSON.stringify(cap.refused));
   // the checkpoint JSON must CONTAIN the real image bytes (b64), not a reference
   const cpRaw = readFileSync(cap.file!, "utf8");
-  assert.ok(cpRaw.length > 93607, `checkpoint ${cpRaw.length}B cannot hold a 93607B image`);
+  assert.ok(cpRaw.length > realBytes.length, `checkpoint ${cpRaw.length}B cannot hold a ${realBytes.length}B image`);
   const cp = JSON.parse(cpRaw);
   assert.equal(cp.evidence[0].sha256, sha256(realBytes));
   const sync = await syncCheckpoints({ stateDir, remote, branch: "cp", author: { name: "t", email: "t@t" } });
@@ -194,7 +230,7 @@ test("restore proof (REAL eval PNG, 93KB): capture -> remote -> delete -> clone-
   const cpFile = execFileSync("find", [restore, "-name", "*.json"], { encoding: "utf8" }).trim();
   const restored = JSON.parse(readFileSync(cpFile, "utf8"));
   const restoredBytes = Buffer.from(restored.evidence[0].b64, "base64");
-  assert.equal(restoredBytes.length, 93607);
+  assert.equal(restoredBytes.length, realBytes.length);
   assert.equal(sha256(restoredBytes), sha256(realBytes));
   assert.equal(restoredBytes.compare(realBytes), 0); // byte-exact
 });
