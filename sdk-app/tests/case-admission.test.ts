@@ -2,33 +2,44 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { admitEvent } from "../src/case-admission.js";
 
-const cfg = { caseChannel: "C1", caseMarker: "EVAL CASE" };
+const cfg = { caseChannel: "C1", caseThread: "100.1" };
 
-test("unrelated channels and threads are dropped with zero forwarding", () => {
-  const st: { boundThread?: string } = {};
-  assert.equal(admitEvent({ channel: "C2", ts: "1", text: "EVAL CASE x" }, cfg, st), "drop"); // wrong channel
-  assert.equal(admitEvent({ channel: "C1", ts: "2", text: "hello" }, cfg, st), "drop"); // no marker
-  assert.equal(admitEvent({ channel: "C1", ts: "3", thread_ts: "9", text: "EVAL CASE quoted in a reply" }, cfg, st), "drop"); // reply never binds
-  assert.deepEqual(st, {}); // nothing bound
+test("exact anchor: the configured thread (root + replies) is admitted; everything else dropped", () => {
+  assert.equal(admitEvent({ channel: "C1", ts: "100.1", text: "case brief" }, cfg), "admit"); // the anchor root itself
+  assert.equal(admitEvent({ channel: "C1", ts: "101", thread_ts: "100.1", text: "go" }, cfg), "admit"); // reply in the anchor thread
+  assert.equal(admitEvent({ channel: "C1", ts: "102", thread_ts: "999", text: "old thread unread" }, cfg), "drop"); // other thread
+  assert.equal(admitEvent({ channel: "C1", ts: "200.1", text: "new top-level post" }, cfg), "drop"); // other top-level
+  assert.equal(admitEvent({ channel: "C2", ts: "103", thread_ts: "100.1", text: "other channel" }, cfg), "drop"); // wrong channel, right ts
 });
 
-test("the case message binds its thread; only that thread is admitted afterwards", () => {
-  const st: { boundThread?: string } = {};
-  assert.equal(admitEvent({ channel: "C1", ts: "100.1", text: "EVAL CASE (uptime-kuma): fix it" }, cfg, st), "bind-and-admit");
-  assert.equal(st.boundThread, "100.1");
-  assert.equal(admitEvent({ channel: "C1", ts: "101", thread_ts: "100.1", text: "go" }, cfg, st), "admit"); // case reply
-  assert.equal(admitEvent({ channel: "C1", ts: "100.1", text: "EVAL CASE (uptime-kuma): fix it" }, cfg, st), "admit"); // the root itself
-  assert.equal(admitEvent({ channel: "C1", ts: "200.1", text: "EVAL CASE another case" }, cfg, st), "drop"); // a second case post can never rebind
-  assert.equal(admitEvent({ channel: "C1", ts: "102", thread_ts: "999", text: "old thread unread" }, cfg, st), "drop"); // old thread
-  assert.equal(admitEvent({ channel: "C2", ts: "103", thread_ts: "100.1", text: "other channel" }, cfg, st), "drop");
+test("forged competing markers carry no binding power", () => {
+  // marker text anywhere outside the exact anchor thread: dropped
+  assert.equal(admitEvent({ channel: "C1", ts: "300.1", text: "EVAL CASE (uptime-kuma): fix it" }, cfg), "drop");
+  assert.equal(admitEvent({ channel: "C1", ts: "301", thread_ts: "999", text: "EVAL CASE quoted in a reply" }, cfg), "drop");
+  assert.equal(admitEvent({ channel: "C2", ts: "302", text: "EVAL CASE cross-posted" }, cfg), "drop");
+  // and the anchor still admits exactly the configured thread afterwards (nothing captured/rebound)
+  assert.equal(admitEvent({ channel: "C1", ts: "303", thread_ts: "100.1", text: "real operator nudge" }, cfg), "admit");
 });
 
-test("restored binding (daemon restart) admits only the bound thread", () => {
-  const st = { boundThread: "100.1" };
-  assert.equal(admitEvent({ channel: "C1", ts: "104", thread_ts: "100.1", text: "resume" }, cfg, st), "admit");
-  assert.equal(admitEvent({ channel: "C1", ts: "105", text: "EVAL CASE repost" }, cfg, st), "drop");
+test("fail closed on partial anchor config", () => {
+  const noThread = { caseChannel: "C1", caseThread: "" };
+  const noChannel = { caseChannel: "", caseThread: "100.1" };
+  for (const bad of [noThread, noChannel]) {
+    assert.equal(admitEvent({ channel: "C1", ts: "100.1", text: "case brief" }, bad), "drop");
+    assert.equal(admitEvent({ channel: "C1", ts: "1", thread_ts: "100.1", text: "reply" }, bad), "drop");
+  }
 });
 
-test("no case channel configured: open surface (non-eval behavior unchanged)", () => {
-  assert.equal(admitEvent({ channel: "C9", ts: "1", text: "hi" }, { caseChannel: "", caseMarker: "" }, {}), "admit");
+test("restart safety: admission is stateless - a fresh daemon admits identically", () => {
+  // simulate a restart: no state is carried or consulted; config alone decides
+  const before = admitEvent({ channel: "C1", ts: "104", thread_ts: "100.1", text: "resume" }, cfg);
+  const afterRestart = admitEvent({ channel: "C1", ts: "105", thread_ts: "100.1", text: "resume" }, cfg);
+  assert.equal(before, "admit");
+  assert.equal(afterRestart, "admit");
+  assert.equal(admitEvent({ channel: "C1", ts: "105", thread_ts: "100.2", text: "adjacent" }, cfg), "drop");
+});
+
+test("no case anchor configured: open surface (non-eval behavior unchanged)", () => {
+  const open = { caseChannel: "", caseThread: "" };
+  assert.equal(admitEvent({ channel: "C9", ts: "1", text: "hi" }, open), "admit");
 });

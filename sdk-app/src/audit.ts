@@ -13,7 +13,7 @@ export type AuditEvent = {
     | "message_in" | "message_out" | "tool_call" | "tool_result"
     | "approval_requested" | "approval_resolved" | "turn_cost" | "error"
     | "identity_denied" | "channel_denied" | "capability_denied" | "checkpoint_refused" | "turn_cancelled" | "image_in" | "image_out"
-    | "escalation" | "message_dropped" | "case_thread_bound";
+    | "escalation" | "message_dropped";
   thread?: string;
   detail: Record<string, unknown>;
   prevHash: string;

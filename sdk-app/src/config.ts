@@ -15,7 +15,10 @@ export type AppConfig = {
   /** GitHub repos the github connector can search, e.g. ["thediff-news/slack-agent-kit"]. */
   githubRepos: string[];
   caseChannel: string;
-  caseMarker: string;
+  /** Exact preselected case thread ts: only this thread may reach the model in eval mode. */
+  caseThread: string;
+  /** Intended GitHub auth identity (login) the PAT must resolve to. */
+  githubExpectedUser: string;
   /** Eval lockdown: run_checks is sandboxed (netns, no network) + command-sanitized. */
   evalLockdown: boolean;
   /** Append-only audit JSONL path. */
@@ -97,7 +100,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     docsRoot: env.SDK_APP_DOCS_ROOT || "docs",
     githubRepos: (env.SDK_APP_GITHUB_REPOS || "").split(",").map((s) => s.trim()).filter(Boolean),
     caseChannel: (env.SDK_APP_CASE_CHANNEL || "").trim(),
-    caseMarker: env.SDK_APP_CASE_MARKER || "EVAL CASE",
+    caseThread: (env.SDK_APP_CASE_THREAD || "").trim(),
+    githubExpectedUser: (env.SDK_APP_GITHUB_EXPECTED_USER || "").trim(),
     evalLockdown: (env.SDK_APP_EVAL_LOCKDOWN || "") === "1",
     auditLog: env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.jsonl",
     checkpointRemote: env.SDK_APP_CHECKPOINT_REMOTE || undefined,
@@ -152,8 +156,9 @@ export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): stri
   const problems: string[] = [];
   if (!c.evalLockdown) problems.push("SDK_APP_EVAL_LOCKDOWN is not '1'");
   if (c.githubRepos.length === 0) problems.push("SDK_APP_GITHUB_REPOS is empty (agent cannot clone the case repo)");
-  if (!c.caseChannel) problems.push("SDK_APP_CASE_CHANNEL unset (strict case-thread admission has no case channel; any thread could trigger paid turns)");
-  if (!c.caseMarker) problems.push("SDK_APP_CASE_MARKER empty (the case thread can never bind)");
+  if (!c.caseChannel) problems.push("SDK_APP_CASE_CHANNEL unset (exact case anchor missing; any thread could trigger paid turns)");
+  if (!c.caseThread) problems.push("SDK_APP_CASE_THREAD unset (exact case anchor missing; refusing to launch without the preselected thread)");
+  if (!c.githubExpectedUser) problems.push("SDK_APP_GITHUB_EXPECTED_USER unset (intended auth identity cannot be validated; the draft PR could be authored by the wrong account)");
   if (c.approvers.length === 0) problems.push("SDK_APP_APPROVERS is empty (nobody can approve)");
   if (Object.keys(c.userAcls).length === 0) problems.push("SDK_APP_USER_ACLS is empty (no enrolled identity; agent is locked out of factory/browser)");
   if (c.dryRun) problems.push("SDK_APP_DRY_RUN is not 0 (writes would be simulated)");
@@ -169,16 +174,30 @@ export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): stri
  * must be readable with the launch environment's gh credentials - otherwise
  * the agent's push/draft-PR would fail hours into a paid run. No mutations;
  * a single repos/<name> read per repo. */
+/** Read-only GitHub target/auth preflight for the private draft-PR route.
+ * What the API PROVES at preflight time: the token authenticates, its login,
+ * and the API-reported repo identity, visibility and permission flags.
+ * What stays UNVERIFIED (it would require a write, which is out of scope
+ * here): that a push or draft-PR creation actually succeeds - branch
+ * protection, SSO authorization and fine-grained token nuances can still
+ * refuse the write even when the flags read true. */
 export async function githubTargetProblems(
   repos: string[],
   runner: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>,
+  opts: { expectedUser: string; requirePrivate?: boolean; requirePush?: boolean },
 ): Promise<string[]> {
   const problems: string[] = [];
   const who = await runner(["api", "user", "--jq", ".login"]);
   if (who.code !== 0 || !who.stdout.trim()) problems.push(`gh auth: cannot read the authenticated user (GH_TOKEN missing/invalid): ${who.stderr.slice(0, 150)}`);
+  else if (opts.expectedUser && who.stdout.trim() !== opts.expectedUser) problems.push(`gh auth: API-reported identity '${who.stdout.trim()}' does not match intended identity '${opts.expectedUser}' - the draft PR would be authored by the wrong account`);
   for (const repo of repos) {
-    const r = await runner(["api", `repos/${repo}`, "--jq", ".full_name"]);
-    if (r.code !== 0 || r.stdout.trim() !== repo) problems.push(`gh target: repo ${repo} is not readable with the configured credentials (${r.stderr.slice(0, 150)}) - the draft PR at the end of the run would fail`);
+    const r = await runner(["api", `repos/${repo}`]);
+    if (r.code !== 0) { problems.push(`gh target: repo ${repo} is not readable with the configured credentials (${r.stderr.slice(0, 150)}) - the draft PR at the end of the run would fail`); continue; }
+    let info: any = {};
+    try { info = JSON.parse(r.stdout); } catch { problems.push(`gh target: repo ${repo} metadata unparsable (${r.stdout.slice(0, 80)})`); continue; }
+    if (info.full_name !== repo) problems.push(`gh target: API-reported repo identity '${info.full_name}' does not match intended target '${repo}'`);
+    if (opts.requirePrivate && info.private !== true) problems.push(`gh target: API reports repo ${repo} is not private - the case must stay private (no upstream visibility)`);
+    if (opts.requirePush && info.permissions?.push !== true) problems.push(`gh target: API-reported permissions for ${repo} lack push - the agent could not push its branch or open the draft PR`);
   }
   return problems;
 }

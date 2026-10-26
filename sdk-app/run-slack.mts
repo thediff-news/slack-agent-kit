@@ -34,7 +34,7 @@ if ((process.env.SDK_APP_EVAL_LOCKDOWN || "") === "1") {
   const ghRunner = (args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>((res) => {
     execFileCb("gh", args, { timeout: 30000 }, (err, stdout, stderr) => res({ code: err ? (err as any).code ?? 1 : 0, stdout: String(stdout), stderr: String(stderr ?? err?.message ?? "") }));
   });
-  problems.push(...await githubTargetProblems(cfg.githubRepos, ghRunner));
+  problems.push(...await githubTargetProblems(cfg.githubRepos, ghRunner, { expectedUser: cfg.githubExpectedUser, requirePrivate: true, requirePush: true }));
   if (problems.length) { console.error("[run-slack] EVAL PREFLIGHT FAILED:\n - " + problems.join("\n - ")); process.exit(1); }
   console.log(`[run-slack] EVAL PREFLIGHT OK: repos=${cfg.githubRepos.join(",")} approvers=${cfg.approvers.length} acls=${Object.keys(cfg.userAcls).length} dryRun=${cfg.dryRun} maxTurns=${cfg.maxTurnsPerMessage} browseAllowlist=${cfg.browseAllowlist.join(",")} proxyState=${process.env.SDK_APP_PROXY_STATE}`);
 }
