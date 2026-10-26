@@ -45,7 +45,7 @@ export const EVAL_SAFE_CMD = new RegExp(
     // source (toolchain + node headers are ro-bound). Scoped to explicit
     // package names; same script-execution exposure as the already-allowed
     // npm ci. node-gyp finds headers via --nodedir=/usr.
-    "|npm rebuild( [\\w@./-]+)+\\b[^\\n;|&]*" +
+    "|npm rebuild( [\\w@][\\w@./-]*)+\\b[^\\n;|&]*" +
     "|npx (tsc|tsx --test\\b.*)" +
     "|pytest\\b[^\\n;|&]*" +
     "|python3? -m pytest\\b[^\\n;|&]*" +

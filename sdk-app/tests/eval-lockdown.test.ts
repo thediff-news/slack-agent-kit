@@ -117,6 +117,16 @@ test("eval allowlist permits scoped npm rebuild for offline native self-repair",
   assert.ok(!EVAL_SAFE_CMD.test("npm rebuild"), "bare rebuild (everything) not allowed");
   assert.ok(!EVAL_SAFE_CMD.test("npm rebuild x; rm -rf /"), "no chaining");
   assert.ok(!EVAL_SAFE_CMD.test("npm rebuild $(cat /etc/passwd)"), "no substitution");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild --"), "flag-looking token is not a package");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild --loglevel silly"), "no bare-flag rebuild");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild `id`"), "no backticks");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild x > /tmp/out"), "no redirect");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild x | sh"), "no pipe");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild x && npm i evil"), "no && chaining");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild x\nnpm i evil"), "no newline chaining");
+  assert.ok(!EVAL_SAFE_CMD.test("npm rebuild ../../escape"), "no leading-dot package token");
+  assert.ok(checkEvalCommand("npm rebuild ../escape") !== undefined, "checkEvalCommand flags path escape");
+  assert.ok(checkEvalCommand("npm rebuild @louislam/sqlite3") === undefined, "scoped rebuild passes checkEvalCommand");
 });
 
 test("app server invocation: host net shared, mounts/secrets isolated, stores bound ro", async () => {

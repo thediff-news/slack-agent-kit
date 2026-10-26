@@ -4,7 +4,7 @@ import { configFromEnv, evalPreflightProblems } from "../src/config.js";
 
 const goodEnv = {
   SDK_APP_EVAL_LOCKDOWN: "1",
-  SDK_APP_GITHUB_REPOS: "org/case-repo",
+  SDK_APP_GITHUB_REPOS: "org/case-repo", SDK_APP_CASE_CHANNEL: "C0CASE",
   SDK_APP_APPROVERS: "U1",
   SDK_APP_USER_ACLS: '{"U1":["operator"]}',
   SDK_APP_DRY_RUN: "0",
@@ -31,4 +31,14 @@ test("eval preflight: every missing critical setting is named", () => {
   assert.ok(problems.some((p) => p.includes("PROXY_CAP_USD")));
   assert.ok(problems.some((p) => p.includes("PROXY_STATE")));
   assert.ok(problems.some((p) => p.includes("RBAC")));
+});
+
+test("githubTargetProblems: auth failure and unreadable repo are reported, clean target passes", async () => {
+  const { githubTargetProblems } = await import("../src/config.js");
+  const ok = await githubTargetProblems(["o/n"], async () => ({ code: 0, stdout: "o/n\n", stderr: "" }));
+  assert.deepEqual(ok, []);
+  const noAuth = await githubTargetProblems(["o/n"], async (args) => args[1] === "user" ? { code: 1, stdout: "", stderr: "no token" } : { code: 0, stdout: "o/n\n", stderr: "" });
+  assert.match(noAuth.join(" "), /gh auth/);
+  const noRepo = await githubTargetProblems(["o/missing"], async (args) => args[1] === "user" ? { code: 0, stdout: "bot\n", stderr: "" } : { code: 1, stdout: "", stderr: "Not Found" });
+  assert.match(noRepo.join(" "), /o\/missing.*not readable/);
 });

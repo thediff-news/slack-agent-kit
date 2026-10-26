@@ -14,6 +14,8 @@ export type AppConfig = {
   docsRoot: string;
   /** GitHub repos the github connector can search, e.g. ["thediff-news/slack-agent-kit"]. */
   githubRepos: string[];
+  caseChannel: string;
+  caseMarker: string;
   /** Eval lockdown: run_checks is sandboxed (netns, no network) + command-sanitized. */
   evalLockdown: boolean;
   /** Append-only audit JSONL path. */
@@ -94,6 +96,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AppConfig {
     chatModel: env.SDK_APP_MODEL_CHAT || "",
     docsRoot: env.SDK_APP_DOCS_ROOT || "docs",
     githubRepos: (env.SDK_APP_GITHUB_REPOS || "").split(",").map((s) => s.trim()).filter(Boolean),
+    caseChannel: (env.SDK_APP_CASE_CHANNEL || "").trim(),
+    caseMarker: env.SDK_APP_CASE_MARKER || "EVAL CASE",
     evalLockdown: (env.SDK_APP_EVAL_LOCKDOWN || "") === "1",
     auditLog: env.SDK_APP_AUDIT_LOG || "sdk-app/state/audit.jsonl",
     checkpointRemote: env.SDK_APP_CHECKPOINT_REMOTE || undefined,
@@ -148,6 +152,8 @@ export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): stri
   const problems: string[] = [];
   if (!c.evalLockdown) problems.push("SDK_APP_EVAL_LOCKDOWN is not '1'");
   if (c.githubRepos.length === 0) problems.push("SDK_APP_GITHUB_REPOS is empty (agent cannot clone the case repo)");
+  if (!c.caseChannel) problems.push("SDK_APP_CASE_CHANNEL unset (strict case-thread admission has no case channel; any thread could trigger paid turns)");
+  if (!c.caseMarker) problems.push("SDK_APP_CASE_MARKER empty (the case thread can never bind)");
   if (c.approvers.length === 0) problems.push("SDK_APP_APPROVERS is empty (nobody can approve)");
   if (Object.keys(c.userAcls).length === 0) problems.push("SDK_APP_USER_ACLS is empty (no enrolled identity; agent is locked out of factory/browser)");
   if (c.dryRun) problems.push("SDK_APP_DRY_RUN is not 0 (writes would be simulated)");
@@ -156,5 +162,23 @@ export function evalPreflightProblems(c: ReturnType<typeof configFromEnv>): stri
   if (!process.env.SDK_APP_CHECKPOINT_REMOTE) problems.push("SDK_APP_CHECKPOINT_REMOTE unset (worktree/evidence checkpoints are local-only; a sandbox rebuild would lose uncommitted work)");
   const rbacOk = Object.entries(c.rbac.users).some(([u, role]) => (c.rbac.roles[role] ?? []).includes("propose") && (c.userAcls[u] !== undefined || c.approvers.includes(u)));
   if (!rbacOk) problems.push("no enrolled identity has an RBAC role granting 'propose' (SDK_APP_RBAC_USERS/SDK_APP_RBAC_ROLES) - factory/browser stay locked");
+  return problems;
+}
+
+/** READ-ONLY GitHub target/auth preflight (eval): every configured case repo
+ * must be readable with the launch environment's gh credentials - otherwise
+ * the agent's push/draft-PR would fail hours into a paid run. No mutations;
+ * a single repos/<name> read per repo. */
+export async function githubTargetProblems(
+  repos: string[],
+  runner: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<string[]> {
+  const problems: string[] = [];
+  const who = await runner(["api", "user", "--jq", ".login"]);
+  if (who.code !== 0 || !who.stdout.trim()) problems.push(`gh auth: cannot read the authenticated user (GH_TOKEN missing/invalid): ${who.stderr.slice(0, 150)}`);
+  for (const repo of repos) {
+    const r = await runner(["api", `repos/${repo}`, "--jq", ".full_name"]);
+    if (r.code !== 0 || r.stdout.trim() !== repo) problems.push(`gh target: repo ${repo} is not readable with the configured credentials (${r.stderr.slice(0, 150)}) - the draft PR at the end of the run would fail`);
+  }
   return problems;
 }

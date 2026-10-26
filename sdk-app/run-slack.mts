@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { captureCheckpoint, recordDebt, settleDebt, syncCheckpoints } from "./src/checkpoint.js";
 import { startBudgetProxy } from "./budget-proxy.mjs";
 import { startSlackApp } from "./src/slack.js";
-import { configFromEnv, evalPreflightProblems } from "./src/config.js";
+import { configFromEnv, evalPreflightProblems, githubTargetProblems } from "./src/config.js";
 
 const realKey = process.env.ANTHROPIC_API_KEY ?? (process.env.SDK_APP_KEY_FILE ? readFileSync(process.env.SDK_APP_KEY_FILE, "utf8").trim() : "");
 if (!realKey) throw new Error("ANTHROPIC_API_KEY (or SDK_APP_KEY_FILE) is required");
@@ -30,6 +30,11 @@ console.log(`[run-slack] budget proxy on :${proxy.port} (hard cap ${process.env.
 const cfg = configFromEnv();
 if ((process.env.SDK_APP_EVAL_LOCKDOWN || "") === "1") {
   const problems = evalPreflightProblems(cfg);
+  const { execFile: execFileCb } = await import("node:child_process");
+  const ghRunner = (args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>((res) => {
+    execFileCb("gh", args, { timeout: 30000 }, (err, stdout, stderr) => res({ code: err ? (err as any).code ?? 1 : 0, stdout: String(stdout), stderr: String(stderr ?? err?.message ?? "") }));
+  });
+  problems.push(...await githubTargetProblems(cfg.githubRepos, ghRunner));
   if (problems.length) { console.error("[run-slack] EVAL PREFLIGHT FAILED:\n - " + problems.join("\n - ")); process.exit(1); }
   console.log(`[run-slack] EVAL PREFLIGHT OK: repos=${cfg.githubRepos.join(",")} approvers=${cfg.approvers.length} acls=${Object.keys(cfg.userAcls).length} dryRun=${cfg.dryRun} maxTurns=${cfg.maxTurnsPerMessage} browseAllowlist=${cfg.browseAllowlist.join(",")} proxyState=${process.env.SDK_APP_PROXY_STATE}`);
 }

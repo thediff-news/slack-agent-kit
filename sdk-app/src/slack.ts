@@ -11,6 +11,7 @@ import { App } from "@slack/bolt";
 import { buildRuntime } from "./runtime.js";
 import type { InputImage } from "./agent.js";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { admitEvent, type AdmissionState } from "./case-admission.js";
 import { basename, dirname } from "node:path";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -123,8 +124,24 @@ export async function startSlackApp(env: NodeJS.ProcessEnv = process.env): Promi
   // A channel message that @mentions the bot arrives as BOTH message and
   // app_mention: handle each Slack event timestamp once.
   const seen = new Set<string>();
+  // Strict case-thread admission (eval): only the bound case thread may ever
+  // reach the model; everything else is an audited drop with zero forwarding.
+  // The binding persists across daemon restarts in the state dir.
+  const bindingPath = config.auditLog.replace(/[^/]+$/, "case-binding.json");
+  const admissionState: AdmissionState = (() => {
+    try { return JSON.parse(readFileSync(bindingPath, "utf8")) as AdmissionState; } catch { return {}; }
+  })();
   const handle = async (event: any, say: any) => {
     if (event.bot_id || (event.subtype && event.subtype !== "file_share")) return;
+    const admission = admitEvent(event, { caseChannel: config.caseChannel, caseMarker: config.caseMarker }, admissionState);
+    if (admission === "drop") {
+      audit.write("message_dropped", { channel: event.channel, ts: event.ts, thread: event.thread_ts ?? event.ts, reason: "outside-case-thread" }, `${event.channel}:${event.thread_ts ?? event.ts}`);
+      return;
+    }
+    if (admission === "bind-and-admit") {
+      try { writeFileSync(bindingPath, JSON.stringify({ boundThread: admissionState.boundThread, boundAt: new Date().toISOString() })); } catch { /* binding re-derives from the case message */ }
+      audit.write("case_thread_bound", { thread: admissionState.boundThread }, `${event.channel}:${event.ts}`);
+    }
     const dedupe = `${event.channel}:${event.ts}`;
     if (seen.has(dedupe)) return;
     seen.add(dedupe);
